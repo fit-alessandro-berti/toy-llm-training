@@ -1,0 +1,32 @@
+{
+  "fields": [
+    "Batch_ID",
+    "Production_Line",
+    "Start_Timestamp",
+    "End_Timestamp",
+    "Operator_ID",
+    "Raw_Material_Lot",
+    "Material_Type",
+    "Machine_ID",
+    "Machine_Settings_Temperature_C",
+    "Machine_Settings_Pressure_PSI",
+    "Cycle_Time_Seconds",
+    "Output_Quantity",
+    "Defective_Units",
+    "Energy_Consumed_kWh",
+    "Ambient_Temperature_C",
+    "Humidity_Percent",
+    "Viscosity_cP",
+    "pH_Level",
+    "Inspection_Result",
+    "Inspection_Timestamp",
+    "Rework_Flag",
+    "Rework_Duration_Seconds",
+    "Packaging_Type",
+    "Shipment_Date",
+    "Destination_Warehouse",
+    "Quality_Score",
+    "Operator_Notes"
+  ],
+  "description": "This dataset captures detailed records from a multi-stage manufacturing process used in an advanced polymer resin production facility. Each record corresponds to a single batch processed on a specific production line within the plant. The process begins by sourcing raw materials identified by their lot numbers and categorized by material type, which are critical for quality traceability. Operators initiate batches by loading machines configured with precise temperature and pressure settings tailored for the polymerization reaction. The dataset measures cycle time to monitor production efficiency, while ambient conditions such as temperature and humidity are recorded to understand their impact on product consistency.\n\nThroughout the batch run, real-time machine IDs and energy consumption metrics are logged to assess equipment performance and energy efficiency. Physical properties like viscosity and pH level are tested periodically, reflecting chemical characteristics essential for downstream application requirements. Inspection results indicate pass/fail status based on visual and instrumental quality checks, with timestamps facilitating traceability.\n\nAny defective units discovered either during production or final inspection are recorded alongside rework flags and durations, documenting corrective actions taken to maintain standards. Upon successful completion, batches are packaged according to various packaging types and scheduled for shipment to designated warehouses. The dataset also incorporates quality scores derived from a composite index evaluating all critical parameters and operator notes capturing qualitative observations. Overall, this comprehensive dataset enables deep analysis of manufacturing efficiency, quality control, process optimization, and supply chain coordination for polymer resin production."
+}

@@ -1,0 +1,30 @@
+{
+  "fields": [
+    "Batch_ID",
+    "Production_Line",
+    "Start_Time",
+    "End_Time",
+    "Operator_ID",
+    "Raw_Material_Code",
+    "Raw_Material_Lot",
+    "Input_Weight_kg",
+    "Machine_Temperature_C",
+    "Machine_Pressure_Pa",
+    "Cycle_Time_sec",
+    "Product_Viscosity_cP",
+    "Product_Color_Code",
+    "Defect_Count",
+    "Defect_Type",
+    "Energy_Consumed_kWh",
+    "Humidity_Percent",
+    "Ambient_Temperature_C",
+    "Quality_Check_Pass",
+    "Rework_Flag",
+    "Final_Product_Weight_kg",
+    "Packaging_Type",
+    "Shipping_Destination",
+    "Customer_Order_ID",
+    "Cost_per_Unit_USD"
+  ],
+  "description": "This dataset captures detailed information from a high-throughput industrial manufacturing process focused on the production of specialty polymer composites used in automotive components. Each entry represents a unique production batch tracked from raw material intake through the entire production line until the finished product is packaged and ready for shipment. The Batch_ID uniquely identifies every batch processed. Production_Line indicates which of the multiple parallel lines produced the batch. Start_Time and End_Time register precise timestamps to measure production durations and throughput efficiency. Operator_ID traces the human resource responsible for overseeing the batch, facilitating accountability and workforce performance analysis. Raw_Material_Code and Raw_Material_Lot track the polymer pellets and additives used, ensuring traceability back to specific suppliers and shipments. Input_Weight_kg records the exact mass of raw materials loaded into the line. Critical machine parameters, including Machine_Temperature_C and Machine_Pressure_Pa, are logged continuously to monitor process stability. Cycle_Time_sec documents the duration required to complete one full production cycle for the batch, directly impacting overall productivity metrics. Product_Viscosity_cP and Product_Color_Code describe physical characteristics essential for ensuring product conformity and aesthetic quality. Defects are meticulously recorded with Defect_Count and Defect_Type, enabling root cause analysis and continuous quality improvement. Energy_Consumed_kWh offers insight into the process energy efficiency, vital for cost and environmental impact assessments. Environmental factors such as Humidity_Percent and Ambient_Temperature_C are tracked to correlate potential effects on product quality and machine performance. Quality_Check_Pass is a binary indicator reflecting if the batch met final quality standards without need for rework, while Rework_Flag specifies whether corrective work was required. Final_Product_Weight_kg notes the weight after processing to detect material losses. Packaging_Type documents the final packaging method, correlating to shipping protocols and customer requirements. Shipping_Destination and Customer_Order_ID link manufacturing output directly to supply chain and sales data streams. Finally, Cost_per_Unit_USD captures the economic dimension, combining raw materials, energy, labor, and overhead into a standardized metric for business analysis. Together, these diverse fields create a comprehensive view of the manufacturing process, enabling advanced analytics such as predictive quality modeling, process optimization, and cost control in a complex production environment."
+}

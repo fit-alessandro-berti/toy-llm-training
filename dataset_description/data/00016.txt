@@ -1,0 +1,33 @@
+{
+  "fields": [
+    "Batch_ID",
+    "Production_Date",
+    "Shift",
+    "Operator_ID",
+    "Machine_ID",
+    "Raw_Material_ID",
+    "Raw_Material_Grade",
+    "Raw_Material_Weight_kg",
+    "Initial_Temperature_C",
+    "Ambient_Temperature_C",
+    "Machine_Setting_Speed_rpm",
+    "Machine_Setting_Pressure_psi",
+    "Mixing_Time_sec",
+    "Heating_Time_min",
+    "Cooling_Time_min",
+    "Final_Product_Weight_kg",
+    "Product_Moisture_Percent",
+    "Product_Density_g_per_cm3",
+    "Number_of_Defects",
+    "Energy_Consumption_kWh",
+    "Water_Usage_Liters",
+    "Operator_Experience_Years",
+    "Quality_Check_Passed",
+    "Inspection_Comments",
+    "Packaging_Type",
+    "Packaging_Weight_g",
+    "Shipment_Destination",
+    "Delivery_Time_Days"
+  ],
+  "description": "This dataset captures a comprehensive range of parameters and metrics from a multi-stage manufacturing process for producing high-grade composite materials used in aerospace applications. Production is organized into discrete batches identified by Batch_ID, with dates and shifts recorded to track temporal variations. Each batch is processed by specific operators using designated machines, identified respectively by Operator_ID and Machine_ID, allowing the assessment of human and mechanical factors on output quality.\n\nThe process starts with selection and weighing of raw materials, specified by Raw_Material_ID and Raw_Material_Grade, with their initial weight and temperature precisely measured. Ambient temperature is also tracked to monitor environmental influences. Key machine settings such as rotational speed and pressure are logged to ensure consistency and enable analysis of operational adjustments.\n\nCritical processing times include mixing, heating, and cooling durations, which directly influence chemical reactions and material properties. Post-processing, the final product\u2019s weight, moisture content, and density are recorded to assess conformity with strict aerospace standards.\n\nProduct quality is evaluated by counting defects and recording the results of quality control inspections, including detailed comments. Resource consumption metrics, such as energy usage in kilowatt-hours and water consumption in liters, are tracked for sustainability and cost-efficiency analysis.\n\nAdditional contextual data includes operator experience, packaging details, shipment destination, and delivery timing to provide end-to-end traceability from raw materials through production to delivery logistics. This rich dataset supports advanced predictive analytics, root cause analysis for defects, optimization of process parameters, and compliance with industry regulations."
+}

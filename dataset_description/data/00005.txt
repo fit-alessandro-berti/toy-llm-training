@@ -1,0 +1,31 @@
+{
+  "fields": [
+    "BatchID",
+    "StartTimestamp",
+    "EndTimestamp",
+    "OperatorID",
+    "MachineID",
+    "RawMaterialType",
+    "RawMaterialBatch",
+    "InputWeight_kg",
+    "ProcessTemperature_C",
+    "ProcessPressure_bar",
+    "MixingSpeed_RPM",
+    "HeatingDuration_min",
+    "CoolingDuration_min",
+    "Viscosity_cP",
+    "pH_Level",
+    "EnergyConsumption_kWh",
+    "OutputWeight_kg",
+    "DefectCount",
+    "DefectType",
+    "QualityInspectionScore",
+    "PackagingType",
+    "PackagingWeight_g",
+    "StorageTemperature_C",
+    "TransportMethod",
+    "ShipmentDate",
+    "CustomerID"
+  ],
+  "description": "This manufacturing process dataset captures detailed information from a specialized chemical blending plant that produces high-performance polymer resins. Each entry corresponds to a single production batch starting from raw material intake through final packaging and shipment. The workflow begins by loading carefully selected raw materials, identified by RawMaterialType and RawMaterialBatch, with recorded InputWeight. The batch is then processed in precision-controlled machinery where critical parameters like ProcessTemperature, ProcessPressure, and MixingSpeed are continuously monitored. Heating and cooling phases are documented by their respective durations, crucial for controlling polymer chain reactions and achieving desired physical properties. Real-time measurements such as Viscosity and pH levels are recorded to ensure process stability and product consistency. EnergyConsumption tracks the efficiency of the operation. Quality control is integral, with post-process DefectCount and DefectType logged alongside a comprehensive QualityInspectionScore that aggregates multiple quality metrics including dimensional checks and chemical composition verification. Finished resin batches are weighed (OutputWeight) and packaged using various PackagingTypes tailored for different customer requirements, with packaging weight noted for logistics optimization. After packaging, controlled StorageTemperature data ensures product integrity until shipment. Finally, the dataset links batches to their respective TransportMethod and ShipmentDate, mapping production outcomes to customer deliveries identified by CustomerID. Operators and machines involved are tracked via OperatorID and MachineID, enabling traceability and performance analysis across the manufacturing floor. This rich dataset supports a wide range of analytical objectives including process optimization, predictive maintenance, quality assurance, and supply chain management."
+}

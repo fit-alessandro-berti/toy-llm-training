@@ -1,0 +1,31 @@
+{
+  "fields": [
+    "Batch_ID",
+    "Product_Code",
+    "Raw_Material_Lot",
+    "Operator_ID",
+    "Machine_ID",
+    "Start_Timestamp",
+    "End_Timestamp",
+    "Process_Phase",
+    "Temperature_C",
+    "Pressure_psi",
+    "Humidity_Percent",
+    "Mixing_Speed_RPM",
+    "Viscosity_cP",
+    "pH_Level",
+    "Curing_Time_Minutes",
+    "Energy_Consumption_kWh",
+    "Defect_Count",
+    "Quality_Score",
+    "Inspection_Notes",
+    "Packaging_Type",
+    "Batch_Weight_kg",
+    "Throughput_Units",
+    "Downtime_Minutes",
+    "Maintenance_Flag",
+    "Shift",
+    "Ambient_Light_Lux"
+  ],
+  "description": "This dataset captures detailed process parameters and quality results from the production line of a specialty polymer manufacturing plant. The plant produces high-performance polymer batches used in automotive and aerospace applications. Each Batch_ID represents a unique production run where raw materials are combined, processed, and cured through multiple phases. The Product_Code identifies the polymer grade being produced, while the Raw_Material_Lot key tracks different incoming material batches to ensure traceability. Operators and machine identifiers record human and equipment involvement, supporting accountability and process optimization efforts.\n\nThe manufacturing process is divided into discrete phases such as mixing, polymerization, curing, and quality inspection. For each phase, parameters including temperature, pressure, humidity, mixing speed, viscosity, and pH are continuously recorded to monitor environmental and chemical conditions critical to product performance. The Curing_Time and Energy_Consumption fields track resource usage important for production efficiency and cost analysis.\n\nPost-processing quality assessments are reflected in Defect_Count and Quality_Score, supplemented by free-text Inspection_Notes that capture subjective observations or anomalies. Packaging_Type, Batch_Weight, and Throughput provide logistical data aligning output with downstream supply chain requirements.\n\nAdditional operational metrics like Downtime, Maintenance_Flag, and Shift help correlate process variability with operational conditions and maintenance schedules. Ambient_Light readings are included as unusual environmental factors that have been hypothesized to affect certain sensitive polymers during curing.\n\nAltogether, this rich dataset enables deep analysis of correlations between process settings, operator actions, environmental conditions, and final product quality. It supports predictive modeling for process control, root cause analysis of defects, and continuous improvement initiatives aimed at maximizing product consistency, resource efficiency, and throughput in a complex, multi-phase manufacturing environment."
+}

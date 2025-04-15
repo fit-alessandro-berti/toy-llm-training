@@ -1,0 +1,33 @@
+{
+  "fields": [
+    "BatchID",
+    "ProductType",
+    "RawMaterialCode",
+    "RawMaterialLot",
+    "OperatorID",
+    "MachineID",
+    "Shift",
+    "StartTimestamp",
+    "EndTimestamp",
+    "ProcessStep",
+    "StepDurationSeconds",
+    "Temperature_C",
+    "Pressure_psi",
+    "Humidity_percent",
+    "Vibration_Level_mm_s",
+    "Voltage_V",
+    "Current_A",
+    "FeedRate_kg_per_hour",
+    "OutputQuantity_units",
+    "DefectCount",
+    "DefectType",
+    "QC_Status",
+    "EnergyConsumed_kWh",
+    "LubricantUsed_ml",
+    "AmbientTemperature_C",
+    "AmbientHumidity_percent",
+    "MaintenanceFlag",
+    "OperatorComments"
+  ],
+  "description": "This manufacturing dataset captures detailed process parameters, machine data, and quality control metrics from a highly automated production line for advanced composite materials used in aerospace components. Each BatchID corresponds to a distinct production run, which starts with the selection of raw materials identified by RawMaterialCode and RawMaterialLot to ensure traceability. The manufacturing process is segmented into multiple ProcessSteps such as mixing, curing, trimming, and finishing, each logged with precise timestamps (StartTimestamp and EndTimestamp) and exact StepDurationSeconds to analyze workflow efficiency.\n\nMachineID and OperatorID fields track the specific equipment used and the technicians responsible during shifts, enabling performance correlation with outcomes. Environmental factors like Temperature_C, Pressure_psi, Humidity_percent, and AmbientTemperature_C are continuously monitored to maintain optimal conditions critical in composite curing. Vibration_Level_mm_s, Voltage_V, and Current_A values provide insight into machine wear or irregularities that may impact product quality.\n\nFeedRate_kg_per_hour and EnergyConsumed_kWh record the input material throughput and energy usage respectively, supporting cost and sustainability assessments. OutputQuantity_units details finished good count per batch alongside DefectCount and categorized DefectType entries that feed into the QC_Status indicator (pass/fail), driving root cause analysis and continuous improvement.\n\nAdditional fields such as LubricantUsed_ml monitor consumable usage, while MaintenanceFlag signals any preventive or corrective activities performed. OperatorComments offer qualitative notes that capture anomalies or observations not easily quantifiable. Collectively, this dataset enables comprehensive process optimization, predictive maintenance modeling, and enhanced quality assurance for a complex, multi-step manufacturing environment."
+}

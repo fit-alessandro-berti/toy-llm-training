@@ -1,0 +1,32 @@
+{
+  "fields": [
+    "BatchID",
+    "ProductionLine",
+    "StartTimestamp",
+    "EndTimestamp",
+    "OperatorID",
+    "MachineID",
+    "MaterialType",
+    "MaterialBatchNumber",
+    "InputWeightKg",
+    "OutputWeightKg",
+    "DefectCount",
+    "DefectTypes",
+    "ProcessTemperatureC",
+    "ProcessPressureBar",
+    "CycleTimeSeconds",
+    "EnergyConsumptionKWh",
+    "AmbientHumidityPercent",
+    "AmbientTemperatureC",
+    "QualityCheckStatus",
+    "QualityCheckTimestamp",
+    "ReworkFlag",
+    "ReworkDetails",
+    "PackagingType",
+    "PackagingWeightKg",
+    "TransportMode",
+    "DeliveryLeadTimeDays",
+    "CustomerFeedbackScore"
+  ],
+  "description": "This dataset captures detailed logs from a complex manufacturing process of a mid-sized factory specializing in producing custom polymer components used in automotive and electronics applications. Each record corresponds to a production batch that moves through a multi-stage process including raw material input, compounding, molding, finishing, quality inspection, and packaging.\n\nThe process begins with selecting raw materials identified by MaterialType and MaterialBatchNumber, that are loaded into machines on specific ProductionLines. Each batch is tracked by BatchID from the moment production starts (StartTimestamp) until it completes (EndTimestamp). Operators and MachineIDs are recorded to enable traceability and accountability.\n\nThe compounding and molding phases involve tightly controlled environmental factors such as ProcessTemperatureC and ProcessPressureBar, which are continuously monitored to ensure optimal chemical and physical properties of the final polymer components. CycleTimeSeconds is logged to measure efficiency and identify bottlenecks. EnergyConsumptionKWh records the electricity used per batch, providing insight into energy efficiency.\n\nPost-production, the weights of input and output materials are measured to assess yield and material losses. DefectCount and DefectTypes provide granular information on quality issues such as surface imperfections, dimensional inaccuracies, or structural defects, which feed into QualityCheckStatus including timestamps and notes for quality assurance.\n\nIf defects require remediation, the ReworkFlag activates and detailed ReworkDetails capture the corrective actions undertaken. Finished goods are then packaged with various PackagingTypes, and packaging weights are recorded to help with inventory and logistics planning. TransportMode and DeliveryLeadTimeDays cover the logistics layer, tracking how products move from factory to customers.\n\nFinally, customer satisfaction is gauged through CustomerFeedbackScore, linking production quality and process parameters directly to market performance. The dataset thus interweaves operational, quality, environmental, and logistics data streams to form a comprehensive view of the manufacturing lifecycle, ideal for advanced analytics, process optimization, predictive maintenance, and automatic report generation using large language models."
+}

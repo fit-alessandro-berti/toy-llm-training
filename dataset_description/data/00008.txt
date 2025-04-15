@@ -1,0 +1,30 @@
+{
+  "fields": [
+    "BatchID",
+    "ProductionDate",
+    "Shift",
+    "OperatorID",
+    "MachineID",
+    "RawMaterialType",
+    "RawMaterialBatch",
+    "InputWeight_kg",
+    "ProcessingStartTime",
+    "ProcessingEndTime",
+    "ProcessTemperature_C",
+    "ProcessPressure_bar",
+    "ProcessSpeed_rpm",
+    "EnergyConsumed_kWh",
+    "CoolingMethod",
+    "CoolingTime_min",
+    "QualityCheckPassed",
+    "DefectType",
+    "DefectSeverity",
+    "FinalProductWeight_kg",
+    "PackagingType",
+    "PackagingWeight_g",
+    "StorageLocation",
+    "ShippingDate",
+    "CustomerOrderID"
+  ],
+  "description": "This dataset captures detailed records of a complex manufacturing process involved in the production of precision-engineered mechanical components. Each row in the dataset corresponds to a single production batch, identified uniquely by the BatchID. The process begins with the selection and weighing of raw materials, which are logged along with batch-specific details such as RawMaterialType and RawMaterialBatch to ensure traceability. The manufacturing occurs in scheduled shifts, with each operator and machine responsible for particular production phases clearly noted. Time stamps record exact start and end times for the processing stage, allowing precise measurement of duration and operational efficiency. Critical process parameters, including ProcessTemperature_C, ProcessPressure_bar, and ProcessSpeed_rpm, are monitored continuously to maintain adherence to strict quality standards. Energy consumption metrics provide insight into the operational costs and environmental impact for each batch. After the main processing, the components undergo a customizable cooling stage, where different CoolingMethods and CoolingTimes are tested to optimize material properties. Quality assurance is a central focus, with pass/fail status recorded alongside detailed defect classifications capturing both defect type and severity. Final product metrics such as weight and packaging specifics complete the manufacturing cycle data. Furthermore, the dataset tracks logistical information from storage to shipping, linking each batch to CustomerOrderID for seamless fulfillment and inventory management. This multifaceted dataset is valuable for predictive analytics and optimization efforts aimed at improving yield, reducing defects, lowering energy use, and refining supply chain operations in advanced manufacturing environments."
+}

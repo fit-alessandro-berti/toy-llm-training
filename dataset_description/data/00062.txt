@@ -1,0 +1,31 @@
+{
+  "fields": [
+    "BatchID",
+    "ProductionDate",
+    "Shift",
+    "OperatorID",
+    "MachineID",
+    "RawMaterialID",
+    "MaterialBatchNumber",
+    "Temperature_C",
+    "Pressure_PSI",
+    "CycleTime_sec",
+    "EnergyConsumed_kWh",
+    "OutputQuantity_units",
+    "DefectCount",
+    "DefectType",
+    "ProcessStep",
+    "Humidity_percent",
+    "CoolingTime_min",
+    "LubricantType",
+    "LubricantVolume_ml",
+    "MachineStatus",
+    "MaintenanceFlag",
+    "AmbientTemperature_C",
+    "OperatorExperienceYears",
+    "QualityScore",
+    "InspectionTimestamp",
+    "Notes"
+  ],
+  "description": "This dataset captures detailed information about the manufacturing process of precision-engineered automotive components produced in a multi-stage assembly line. Each record represents a single batch processed during a specific production shift and contains granular measurements and metadata collected from various sensors and operator inputs. The production process begins with careful selection and tracking of raw materials, each assigned a unique MaterialBatchNumber to ensure traceability. Throughout the process, key parameters such as temperature, pressure, and humidity are continuously monitored to maintain optimal conditions inside the environment-controlled manufacturing cells. Specialized industrial machines execute sequences of machining, molding, and assembly steps, with each step recorded as 'ProcessStep' to allow deep analysis of time and quality metrics. MachineStatus flags indicate operational states (e.g., running, idle, fault), while MaintenanceFlag highlights whether preventive or corrective maintenance was performed during the batch run. Operators log comprehensive notes and input details like LubricantType and volume used, to complement automated sensor data. Quality control is performed via on-line inspection systems that assign a 'QualityScore' and document any defects by type and count. This rich combination of sensor outputs, operator annotations, and environmental measurements provides a robust foundation for training large language models to generate detailed, context-aware descriptions and summaries of manufacturing runs, troubleshooting reports, and process improvement recommendations."
+}

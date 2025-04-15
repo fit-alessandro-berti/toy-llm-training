@@ -1,0 +1,33 @@
+{
+  "fields": [
+    "BatchID",
+    "ProductionDate",
+    "Shift",
+    "OperatorID",
+    "MachineID",
+    "MaterialType",
+    "MaterialBatchNumber",
+    "InputWeight_kg",
+    "Temperature_C",
+    "Pressure_Pa",
+    "CycleTime_s",
+    "Humidity_pct",
+    "EnergyConsumption_kWh",
+    "DefectCount",
+    "QualityScore",
+    "OutputWeight_kg",
+    "WasteWeight_kg",
+    "CoolingTime_min",
+    "InspectionPass",
+    "ReworkCount",
+    "ScrapReason",
+    "MaintenancePerformed",
+    "MaintenanceType",
+    "Downtime_min",
+    "AmbientTemp_C",
+    "AmbientHumidity_pct",
+    "LubricantType",
+    "LubricantQuantity_ml"
+  ],
+  "description": "This dataset captures comprehensive details of a complex manufacturing process involved in the production of high-precision polymer components used in aerospace and automotive industries. Each record corresponds to a single batch produced during a specific production shift, recorded over multiple months to allow process monitoring and optimization. The process begins with the careful selection and weighing of raw polymer materials, identified by 'MaterialType' and 'MaterialBatchNumber'. Operators load the input materials into injection molding machines uniquely identified by 'MachineID'. It is critical to maintain parameters such as 'Temperature_C', 'Pressure_Pa', 'Humidity_pct', and 'CycleTime_s' to ensure material integrity and dimensional accuracy. Environmental conditions like 'AmbientTemp_C' and 'AmbientHumidity_pct' are logged as they influence polymer curing and product consistency. Energy consumption data ('EnergyConsumption_kWh') is recorded per batch, aiding in evaluating machine efficiency and sustainability metrics.\n\nQuality control is rigorous: 'DefectCount' and 'QualityScore' fields quantify the number and severity of defects, ranging from surface imperfections to structural weaknesses. Depending on inspection outcomes ('InspectionPass'), products may undergo rework or be scrapped, with reasons documented in 'ScrapReason'. Maintenance activities and downtime events are tracked meticulously to correlate equipment performance with product quality, with details such as 'MaintenancePerformed', 'MaintenanceType', and 'Downtime_min'. Additional chemical inputs like lubricants are logged ('LubricantType' and 'LubricantQuantity_ml') due to their potential impact on machine function and final product quality.\n\nThis rich dataset enables advanced machine learning models to analyze complex interactions between process parameters, material characteristics, and product quality. The goal is to optimize manufacturing efficiency, reduce waste, minimize downtime, and improve overall product reliability in demanding industrial environments."
+}

@@ -1,0 +1,31 @@
+{
+  "fields": [
+    "batch_id",
+    "production_line",
+    "start_timestamp",
+    "end_timestamp",
+    "operator_id",
+    "machine_model",
+    "material_batch_code",
+    "raw_material_weight_kg",
+    "temperature_celsius",
+    "pressure_psi",
+    "humidity_percent",
+    "process_step",
+    "cycle_time_seconds",
+    "product_defect_code",
+    "defect_severity",
+    "energy_consumption_kwh",
+    "cooling_time_seconds",
+    "quality_score",
+    "final_product_weight_kg",
+    "packaging_type",
+    "inspection_pass",
+    "rework_needed",
+    "downtime_minutes",
+    "maintenance_performed",
+    "shift",
+    "notes"
+  ],
+  "description": "This dataset captures detailed records of a complex, multi-stage manufacturing process for high-precision industrial components. Each row represents a single batch processed on one of several highly automated production lines, where the manufacturing consists of distinct sequential steps such as raw material preparation, molding, heat treatment, precision machining, surface finishing, and quality inspection. The 'batch_id' uniquely identifies each production run, while timestamps record the exact start and end of each process cycle to enable analysis of throughput and efficiency. Operator IDs and machine models log human and equipment involvement, facilitating accountability and maintenance tracking. Extensive environmental and process parameters such as temperature, pressure, and humidity are recorded to monitor compliance with strict operational thresholds essential for product integrity. The dataset also tracks raw material inputs, energy consumption, and downtime incidents, providing valuable insight into resource utilization and potential bottlenecks. Defects are classified with severity codes linked to final quality scores, offering a direct link between process conditions and product outcomes. Additional fields such as packaging type, inspection results, rework necessity, and shift information enable cross-sectional analysis by production conditions, enabling continuous process optimization and predictive maintenance strategies. Notes from operators provide qualitative context, enriching the dataset with experiential knowledge that can be leveraged for advanced AI-driven process improvements."
+}

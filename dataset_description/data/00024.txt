@@ -1,0 +1,30 @@
+{
+  "fields": [
+    "BatchID",
+    "ProductType",
+    "StartTimestamp",
+    "EndTimestamp",
+    "OperatorID",
+    "MachineID",
+    "RawMaterialLot",
+    "MaterialType",
+    "MaterialQuantityKg",
+    "TemperatureC",
+    "PressureBar",
+    "HumidityPercent",
+    "ProcessStep",
+    "CycleTimeSeconds",
+    "EnergyConsumptionKWh",
+    "DefectCount",
+    "DefectType",
+    "InspectionResult",
+    "ReworkFlag",
+    "ReworkReason",
+    "FinalWeightKg",
+    "PackagingType",
+    "Shift",
+    "QualityScore",
+    "Comments"
+  ],
+  "description": "This dataset captures detailed records of a multi-stage manufacturing process employed in a high-precision composite materials plant. The production workflow begins with the receipt and verification of raw materials identified by unique RawMaterialLot codes and their MaterialType classifications, typically ranging from carbon fibers to resin polymers. Each batch, identified by BatchID, undergoes an intricate series of processing steps recorded under ProcessStep, which include mixing, curing, molding, and finishing phases. Key machine parameters such as TemperatureC, PressureBar, and HumidityPercent are continuously monitored during each step to ensure optimal conditions for material bonding and structural integrity. Operators oversee specific machines (MachineID), with their activities logged by OperatorID and Shift, enabling robust traceability and accountability. The process efficiency is gauged via CycleTimeSeconds and EnergyConsumptionKWh metrics, reflecting both process speed and energy utilization. Quality control is enforced rigorously: after each batch completes the production cycle, inspection results categorize the output as pass or fail, with DefectCount and DefectType fields detailing any identified imperfections ranging from delamination to voids. Batches requiring rework are flagged with ReworkFlag and annotated with ReworkReason to guide corrective measures. Final product characteristics like FinalWeightKg and PackagingType are recorded before shipment. Subjective observations and notes from operators or quality inspectors are stored in the Comments field for contextual insight. Overall, this dataset provides a comprehensive view of the manufacturing process, integrating machine data, operator input, environmental conditions, and quality metrics to support process optimization, traceability, and compliance within the composite materials industry."
+}

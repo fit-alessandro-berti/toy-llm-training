@@ -1,0 +1,33 @@
+{
+  "fields": [
+    "Batch_ID",
+    "Production_Line",
+    "Start_Timestamp",
+    "End_Timestamp",
+    "Operator_ID",
+    "Product_Code",
+    "Material_Lot_Number",
+    "Raw_Material_Weight_kg",
+    "Machine_Temperature_C",
+    "Pressure_psi",
+    "Cycle_Time_seconds",
+    "Defect_Count",
+    "Quality_Check_Completed",
+    "Quality_Rating_Score",
+    "Energy_Consumption_kWh",
+    "Ambient_Temperature_C",
+    "Humidity_Percentage",
+    "Lubricant_Type",
+    "Lubricant_Quantity_ml",
+    "Maintenance_Flag",
+    "Shift",
+    "Downtime_Reason",
+    "Rework_Flag",
+    "Final_Product_Weight_kg",
+    "Packaging_Type",
+    "Shipping_Warehouse",
+    "Batch_Approval_Status",
+    "Audit_Timestamp"
+  ],
+  "description": "This dataset captures detailed records of a complex manufacturing process within a high-volume precision components factory. Each entry represents a single production batch that moves through multiple stages on an automated assembly and finishing production line. The process begins when raw materials arrive and are assigned a lot number, which ties raw material sourcing data back to quality outcomes. Production starts with the raw material being weighed and loaded onto the designated machine on a specific production line, tracked by the Batch_ID and Production_Line fields. Machines operate under tightly controlled conditions, with continuous monitoring of temperature, pressure, and cycle times captured to ensure optimal processing parameters are maintained to prevent defects. Operators, identified by unique Operator_IDs, oversee the functioning and intervene as needed, with shift information recorded to relate performance and outcomes to labor conditions. The dataset also includes environmental conditions such as ambient temperature and humidity that can impact process stability and product quality. Throughout production, energy consumption and lubricant usage are tracked to monitor resource efficiency and mechanical health. Quality assurance protocols are embedded with flagging of inspection completion, numeric quality rating scores, defect counts, and rework indicators, facilitating root cause analysis in case of failures. Downtimes and maintenance events are logged with reasons to improve predictive maintenance scheduling. At the conclusion of manufacturing, final product weights and packaging types are recorded, linked to shipping warehouse details for downstream logistics integration. Batch approval status fields denote whether the batch passed final inspections or requires remediation. Lastly, audit timestamps secure traceability and compliance with manufacturing governance policies. This comprehensive dataset supports advanced analytics, predictive quality modeling, resource optimization, and continuous improvement initiatives within a modern industrial production environment."
+}

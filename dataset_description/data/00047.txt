@@ -1,0 +1,33 @@
+{
+  "fields": [
+    "batch_id",
+    "production_line",
+    "start_timestamp",
+    "end_timestamp",
+    "operator_id",
+    "machine_id",
+    "product_sku",
+    "raw_material_lot",
+    "input_material_weight_kg",
+    "processing_temperature_c",
+    "processing_pressure_psi",
+    "cycle_time_seconds",
+    "energy_consumed_kwh",
+    "defect_count",
+    "defect_type",
+    "inspection_pass",
+    "final_product_weight_kg",
+    "humidity_percentage",
+    "ambient_temperature_c",
+    "maintenance_flag",
+    "maintenance_type",
+    "downtime_minutes",
+    "shift",
+    "quality_score",
+    "product_dimension_length_mm",
+    "product_dimension_width_mm",
+    "product_dimension_height_mm",
+    "operator_notes"
+  ],
+  "description": "This dataset captures detailed records from a multi-stage manufacturing process of precision-engineered polymer components used in automotive assemblies. Each entry corresponds to a single batch processed on a given production line within a high-complexity factory environment. The manufacturing workflow begins when raw polymer pellets from specific raw material lots are loaded into the processing machines. Variables such as input material weight, processing temperature, and pressure are tightly controlled and logged in real time to ensure product consistency. Operators monitor each batch, recording cycle times and any anomalies encountered. The equipment is outfitted with advanced sensors that track energy consumption and ambient conditions such as humidity and temperature, which impact the curing and molding phases. A quality assurance team conducts inspections post-processing, annotating defect counts and types\u2014ranging from surface blemishes to dimensional inaccuracies\u2014which are used to calculate an overall quality score per batch. Operator notes supplement the quantitative data by providing context on observed irregularities or procedural deviations. Maintenance activities are tracked meticulously, with logs on types of maintenance performed and downtime incurred, reflecting the factory's continuous improvement processes. The final product dimensions and weights are measured precisely to verify adherence to stringent automotive industry standards. The dataset is structured to enable predictive analytics and root cause analysis, facilitating optimization of machine parameters, reduction of defect rates, and enhancement of energy efficiency across production lines and shifts."
+}
