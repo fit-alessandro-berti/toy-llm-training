@@ -50,7 +50,7 @@ class Config:
     num_heads = 4
     d_ff = 256
     dropout = 0.1
-    max_seq_len = 2048 # Max length for combined "SOS Q SEP A EOS" sequence during training
+    max_seq_len = 1024 # Max length for combined "SOS Q SEP A EOS" sequence during training
 
     # Training
     batch_size = 8 # Might need smaller batch size due to longer sequences
@@ -60,7 +60,7 @@ class Config:
     pad_token_id = 0 # Will be set after tokenization
 
     # Generation
-    gen_max_len = 2000 # Max length of the *generated answer*
+    gen_max_len = 50 # Max length of the *generated answer*
     gen_temperature = 0.7
     gen_top_k = 5
 
@@ -377,10 +377,11 @@ print("\n--- Generating Answers ---")
 test_questions = [x[0] for x in Config.test_qa_data]
 
 for q in test_questions:
+    print(f"Q: {q}")
+
     generated_ans = generate_answer(model, tokenizer, q,
                                     max_len=config.gen_max_len,
                                     temperature=config.gen_temperature,
                                     top_k=config.gen_top_k,
                                     config=config)
-    print(f"Q: {q}")
     print(f"A: {generated_ans}\n")
