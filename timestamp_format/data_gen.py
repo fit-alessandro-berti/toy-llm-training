@@ -4,7 +4,7 @@ import time
 import json
 import traceback
 
-prompt = "I need to train a LLM to generate descriptions of a manufacturing process-related dataset. Please produce a JSON containing two keys: 'fields' (which is the list of fields contained in the dataset, for example, like it would be output by Pandas) and 'description' (containing a long textual description of the underlying process). Please use your fantasy to generate an interesting dataset with lots of fields and diversity. Please put the JSON between the tags ```json and ```"
+prompt = "I need to train a LLM to recognize timestamp formats. This can be done if you generate a list of timestamps and the associated format that should be used for the parsing. Please produce a JSON containing two keys: 'values' (which is the list of timestamp values) and 'format' (containing the recognized format). Please use your fantasy to generate an interesting timestamp format, but make sure that is a standard, recognized, format (not something imaginary). Please put the JSON between the tags ```json and ```"
 
 i = 0
 while i < 200:
@@ -17,7 +17,7 @@ while i < 200:
             resp = resp.split("```json")[-1].split("```")[0]
             print(resp)
             resp = json.loads(resp)
-            if not ("fields" in resp and "description" in resp):
+            if not ("values" in resp and "format" in resp):
                 raise Exception("incomplete: "+str(resp))
             output_file = open(output_file_path, "w")
             json.dump(resp, output_file, indent=2)

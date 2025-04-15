@@ -17,7 +17,7 @@ def load_qa_data():
     for file in files:
         file_path = os.path.join("data", file)
         contents = json.load(open(file_path, "r"))
-        qa_data.append((str(contents["fields"]), contents["description"]))
+        qa_data.append((str(contents["values"]), contents["format"]))
     return qa_data
 
 
