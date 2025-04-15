@@ -30,7 +30,7 @@ class Config:
     qa_data = all_qa_data[:int(len(all_qa_data)*0.8)]
     test_qa_data = all_qa_data[int(len(all_qa_data)*0.75):]
 
-    #print(qa_data, len(qa_data))
+    #print(qa_data); input()
     #print(test_qa_data, len(test_qa_data))
 
     # Combine all text to build vocabulary initially
@@ -44,13 +44,13 @@ class Config:
     special_tokens = [PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, SEP_TOKEN]
 
     # Model Architecture (Adjust as needed, check parameter count)
-    vocab_size = 0 # Will be set after tokenization
+    vocab_size = 110 # Will be set after tokenization
     d_model = 128
     num_layers = 3
     num_heads = 4
     d_ff = 256
     dropout = 0.1
-    max_seq_len = 64 # Max length for combined "SOS Q SEP A EOS" sequence during training
+    max_seq_len = 2048 # Max length for combined "SOS Q SEP A EOS" sequence during training
 
     # Training
     batch_size = 8 # Might need smaller batch size due to longer sequences
@@ -60,7 +60,7 @@ class Config:
     pad_token_id = 0 # Will be set after tokenization
 
     # Generation
-    gen_max_len = 30 # Max length of the *generated answer*
+    gen_max_len = 2000 # Max length of the *generated answer*
     gen_temperature = 0.7
     gen_top_k = 5
 
