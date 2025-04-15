@@ -27,7 +27,7 @@ class Config:
     # Simple dummy QA dataset. Replace with your actual data.
     # Format: list of tuples (question, answer)
     all_qa_data = load_qa_data()
-    qa_data = all_qa_data[:int(len(all_qa_data)*0.8)]
+    qa_data = all_qa_data[:int(len(all_qa_data)*1.1)]
     test_qa_data = all_qa_data[int(len(all_qa_data)*0.75):]
 
     #print(qa_data); input()
