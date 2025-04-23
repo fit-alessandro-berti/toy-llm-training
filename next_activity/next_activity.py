@@ -7,11 +7,14 @@ import math
 import time
 import random
 import string # To generate character mappings
+import pm4py
+
 
 # --- Configuration ---
 class Config:
     # Data: List of process traces (sequences of activity strings)
     # Replace this with your actual process traces
+    """
     process_traces_str = [
         ("register request", "check ticket", "decide", "reject request", "send notification"),
         ("register request", "check ticket", "decide", "pay compensation", "send notification"),
@@ -24,6 +27,12 @@ class Config:
         ("register request", "check ticket", "pay compensation", "send notification"), # Example shorter trace
         ("register request", "reject request"), # Example very short trace
     ]
+    """
+
+    log = pm4py.read_xes("../data/receipt.xes")
+    process_traces_str = pm4py.project_on_event_attribute(log, "concept:name")
+    #print(process_traces_str)
+    #input()
 
     random.shuffle(process_traces_str)
     # Split data (adjust ratio as needed)
