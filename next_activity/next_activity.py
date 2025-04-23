@@ -29,7 +29,7 @@ class Config:
     ]
     """
 
-    log = pm4py.read_xes("../data/receipt.xes")
+    log = pm4py.read_xes("../data/running-example.xes")
     process_traces_str = pm4py.project_on_event_attribute(log, "concept:name")
     process_traces_str = list({tuple(x) for x in process_traces_str})
 
