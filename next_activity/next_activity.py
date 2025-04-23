@@ -31,6 +31,7 @@ class Config:
 
     log = pm4py.read_xes("../data/receipt.xes")
     process_traces_str = pm4py.project_on_event_attribute(log, "concept:name")
+    process_traces_str = list(set(process_traces_str))
     #print(process_traces_str)
     #input()
 
