@@ -58,7 +58,7 @@ class Config:
 
     # Generation (Suffix Prediction)
     gen_max_len = 30 # Max length of the *predicted suffix*
-    gen_temperature = 0.0 # 0.0 for greedy decoding (most likely), > 0 for sampling
+    gen_temperature = 0.3 # 0.0 for greedy decoding (most likely), > 0 for sampling
     gen_top_k = 0 # 0 to disable top-k sampling
 
 config = Config()
