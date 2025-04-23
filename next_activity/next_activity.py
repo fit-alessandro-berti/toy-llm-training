@@ -25,6 +25,7 @@ class Config:
         ("register request", "reject request"), # Example very short trace
     ]
 
+    random.shuffle(process_traces_str)
     # Split data (adjust ratio as needed)
     split_idx = int(len(process_traces_str) * 0.8)
     train_traces = process_traces_str[:split_idx]
