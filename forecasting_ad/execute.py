@@ -1,152 +1,241 @@
 # -*- coding: utf-8 -*-
 """
-Transformer Model for Multivariate Time Series Forecasting
-Scenario: Manufacturing Process Monitoring & Forecasting
+Transformer for Multivariate Time Series Forecasting in Manufacturing
+
+This script demonstrates a complete example (training + inference) of using
+a Transformer architecture with PyTorch for forecasting multivariate time series
+data, simulating a manufacturing process scenario. It connects process mining
+concepts (activity sequences) with sensor data.
+
+Designed for command-line execution, no graphical output.
 """
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 import math
 import time
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
+import random
 
-# --- Configuration ---
-# Data parameters
-N_SAMPLES = 2000  # Number of time steps in the dataset
-N_FEATURES_NUM = 2  # Number of numerical features (e.g., temperature, pressure)
-N_FEATURES_CAT = 1  # Number of categorical features (e.g., machine state)
-N_CATEGORIES = 4    # Number of unique machine states (e.g., Idle, Running, Maintenance, Error)
-SEQ_LEN = 60        # Input sequence length (lookback window)
-PRED_LEN = 10       # Prediction horizon (how many steps to forecast)
+# 1. Configuration & Parameters
+# ---------------------------
+# Data Simulation Parameters
+N_SAMPLES = 1000  # Total number of time steps in the simulated process
+N_MACHINES = 3    # Number of machines in the factory
+ACTIVITIES = ['Idle', 'Setup', 'Processing_A', 'Processing_B', 'Maintenance', 'Quality_Check']
 
-# Model parameters
-D_MODEL = 64        # Dimension of the model (embedding size)
-N_HEAD = 4          # Number of attention heads
-N_LAYERS = 3        # Number of Transformer encoder layers
-DIM_FEEDFORWARD = 128 # Dimension of the feedforward network
-DROPOUT = 0.1       # Dropout rate
+# Model Parameters
+SEQ_LENGTH = 20      # Input sequence length (lookback window)
+PRED_LENGTH = 5      # Prediction horizon (how many steps ahead to forecast)
+D_MODEL = 64         # Dimension of the model (embedding size, must be divisible by N_HEAD)
+N_HEAD = 4           # Number of attention heads in the Transformer
+N_LAYERS = 3         # Number of Transformer encoder layers
+D_FF = 128           # Dimension of the feedforward network in Transformer
+DROPOUT = 0.1        # Dropout rate
+OUTPUT_FEATURES = 2  # Number of features to forecast (e.g., Sensor 1, Quality)
 
-# Training parameters
+# Training Parameters
 BATCH_SIZE = 32
-EPOCHS = 10 # Keep low for a quick demo, increase for better results
+EPOCHS = 10 # Reduced for quicker demonstration
 LEARNING_RATE = 0.001
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print(f"Using device: {DEVICE}")
-print(f"Input sequence length: {SEQ_LEN}, Prediction length: {PRED_LEN}")
+print(f"--- Configuration ---")
+print(f"Sequence Length: {SEQ_LENGTH}, Prediction Length: {PRED_LENGTH}")
+print(f"Model Dimension: {D_MODEL}, Heads: {N_HEAD}, Layers: {N_LAYERS}")
+print(f"Output Features: {OUTPUT_FEATURES}")
+print(f"Epochs: {EPOCHS}, Batch Size: {BATCH_SIZE}, LR: {LEARNING_RATE}")
+print("-" * 20)
 
-# --- 1. Synthetic Data Generation ---
-def generate_manufacturing_data(n_samples, n_features_num, n_categories):
-    """Generates synthetic multivariate time series data."""
-    print("Generating synthetic manufacturing data...")
-    time_steps = np.arange(n_samples)
-    data = np.zeros((n_samples, n_features_num + 1)) # +1 for categorical
+# 2. Data Simulation
+# ------------------
+def simulate_manufacturing_data(n_samples, n_machines, activities):
+    """Generates synthetic multivariate time series data for manufacturing."""
+    data = []
+    current_activity = {m: 'Idle' for m in range(n_machines)}
+    sensor1 = {m: 50.0 for m in range(n_machines)}
+    sensor2 = {m: 0.1 for m in range(n_machines)}
+    quality = {m: 95.0 for m in range(n_machines)}
 
-    # Numerical features (e.g., sensors) - combine trends and seasonality
-    for i in range(n_features_num):
-        trend = 0.01 * time_steps
-        seasonality = 5 * np.sin(2 * np.pi * time_steps / (100 + i*20))
-        noise = np.random.normal(0, 1, n_samples)
-        data[:, i] = trend + seasonality + noise + 20 # Base value
+    activity_encoder = LabelEncoder()
+    activity_encoder.fit(activities)
+    n_activities = len(activities)
 
-    # Categorical feature (e.g., machine state) - simulate cycles
-    cycle_len = 150
-    states = []
-    for t in time_steps:
-        if (t % cycle_len) < 80: # Running
-            state = 1
-        elif (t % cycle_len) < 110: # Idle
-            state = 0
-        elif (t % cycle_len) < 130: # Maintenance
-            state = 2
-        else: # Error (less frequent)
-             state = 3
-        # Add some noise/randomness
-        if np.random.rand() < 0.05:
-             state = np.random.randint(0, n_categories)
-        states.append(state)
-    data[:, n_features_num] = np.array(states)
+    print("Simulating data...")
+    for i in range(n_samples):
+        for machine_id in range(n_machines):
+            # Simulate activity transitions (simple state machine logic)
+            rand_val = random.random()
+            last_activity = current_activity[machine_id]
 
-    print(f"Generated data shape: {data.shape}")
-    return data
+            if last_activity == 'Idle':
+                if rand_val < 0.3: current_activity[machine_id] = 'Setup'
+            elif last_activity == 'Setup':
+                 if rand_val < 0.8: current_activity[machine_id] = random.choice(['Processing_A', 'Processing_B'])
+                 else: current_activity[machine_id] = 'Idle' # Failed setup
+            elif last_activity.startswith('Processing'):
+                 if rand_val < 0.7: current_activity[machine_id] = 'Quality_Check'
+                 elif rand_val < 0.8: current_activity[machine_id] = 'Maintenance' # Needs maintenance
+                 else: pass # Continue processing
+            elif last_activity == 'Quality_Check':
+                 if rand_val < 0.9: current_activity[machine_id] = 'Idle' # Pass
+                 else: current_activity[machine_id] = 'Maintenance' # Fail -> Maintenance
+            elif last_activity == 'Maintenance':
+                 if rand_val < 0.7: current_activity[machine_id] = 'Idle' # Fixed
 
-# --- 2. Data Preprocessing ---
-def create_sequences(data, seq_len, pred_len):
+            activity_num = activity_encoder.transform([current_activity[machine_id]])[0]
+
+            # Simulate sensor readings based on activity
+            s1_noise = np.random.normal(0, 2)
+            s2_noise = np.random.normal(0, 0.05)
+            q_noise = np.random.normal(0, 1)
+
+            if current_activity[machine_id] == 'Processing_A':
+                sensor1[machine_id] += 1.5 + s1_noise
+                sensor2[machine_id] += 0.02 + s2_noise
+                quality[machine_id] -= 0.5 + abs(q_noise) # Quality degrades slightly
+            elif current_activity[machine_id] == 'Processing_B':
+                sensor1[machine_id] += 0.8 + s1_noise
+                sensor2[machine_id] -= 0.01 + s2_noise
+                quality[machine_id] -= 0.3 + abs(q_noise)
+            elif current_activity[machine_id] == 'Maintenance':
+                sensor1[machine_id] = 50.0 + s1_noise # Reset somewhat
+                sensor2[machine_id] = 0.1 + s2_noise
+                quality[machine_id] = 98.0 + q_noise # Improve quality after maintenance
+            elif current_activity[machine_id] == 'Setup':
+                sensor1[machine_id] += s1_noise
+                sensor2[machine_id] += s2_noise
+                quality[machine_id] += q_noise * 0.1
+            else: # Idle, Quality Check
+                 sensor1[machine_id] += s1_noise * 0.5
+                 sensor2[machine_id] += s2_noise * 0.5
+                 quality[machine_id] += q_noise * 0.1
+
+            # Clamp values to reasonable ranges
+            sensor1[machine_id] = max(30, min(100, sensor1[machine_id]))
+            sensor2[machine_id] = max(0, min(1, sensor2[machine_id]))
+            quality[machine_id] = max(70, min(100, quality[machine_id]))
+
+            data.append({
+                'timestamp': i,
+                'machine_id': machine_id,
+                'activity_code': activity_num,
+                'sensor1': sensor1[machine_id],
+                'sensor2': sensor2[machine_id],
+                'quality': quality[machine_id]
+            })
+
+    df = pd.DataFrame(data)
+    print("Data simulation complete.")
+    return df, activity_encoder, n_activities
+
+# Generate data
+df, activity_encoder, n_activities = simulate_manufacturing_data(N_SAMPLES, N_MACHINES, ACTIVITIES)
+
+print("\n--- Sampled Data Head ---")
+print(df.head())
+print("-" * 20)
+
+# 3. Data Preprocessing
+# ---------------------
+print("Preprocessing data...")
+# Separate data per machine for easier sequence creation
+data_per_machine = [df[df['machine_id'] == m].copy() for m in range(N_MACHINES)]
+
+# Normalize numerical features (Sensor1, Sensor2, Quality)
+# We'll fit scalers globally, but apply per machine for sequence creation
+scalers = {}
+numerical_cols = ['sensor1', 'sensor2', 'quality']
+target_cols = ['sensor1', 'quality'] # Features we want to predict
+target_indices = [numerical_cols.index(col) for col in target_cols] # Indices within numerical_cols
+
+for col in numerical_cols:
+    scaler = MinMaxScaler()
+    # Fit on the entire column across all machines
+    scalers[col] = scaler.fit(df[[col]])
+    # Apply scaling per machine
+    for m_df in data_per_machine:
+        m_df[f'{col}_norm'] = scalers[col].transform(m_df[[col]])
+
+# Create sequences
+def create_sequences(machine_data, seq_length, pred_length, numerical_cols_norm, target_indices):
     """Creates input sequences and corresponding target sequences."""
-    xs, ys = [], []
-    for i in range(len(data) - seq_len - pred_len + 1):
-        x = data[i:(i + seq_len)]
-        y = data[(i + seq_len):(i + seq_len + pred_len)]
-        xs.append(x)
-        ys.append(y)
-    return np.array(xs), np.array(ys)
+    X, y = [], []
+    activity_codes = machine_data['activity_code'].values
+    numerical_data = machine_data[[f'{col}_norm' for col in numerical_cols]].values
 
-def preprocess_data(raw_data, n_features_num, n_categories, seq_len, pred_len):
-    """Applies scaling, encoding, and sequencing."""
-    print("Preprocessing data...")
+    if len(machine_data) < seq_length + pred_length:
+        return np.array([]), np.array([]) # Not enough data for this machine
 
-    # Define preprocessing steps for numerical and categorical features
-    # Note: OneHotEncoder creates n_categories binary columns
-    numerical_features = list(range(n_features_num))
-    categorical_features = [n_features_num]
+    for i in range(len(machine_data) - seq_length - pred_length + 1):
+        # Input sequence: activity codes + normalized numerical data
+        seq_activities = activity_codes[i : i + seq_length]
+        seq_numerical = numerical_data[i : i + seq_length]
+        # Combine activity code as another feature dimension
+        # Shape: (seq_length, num_features + 1)
+        input_seq = np.hstack((seq_activities.reshape(-1, 1), seq_numerical))
 
-    # Scaler for numerical features
-    num_pipeline = Pipeline([
-        ('scaler', MinMaxScaler())
-    ])
+        # Target sequence: future values of selected numerical features
+        target_seq = numerical_data[i + seq_length : i + seq_length + pred_length, target_indices]
+        # Shape: (pred_length, num_target_features)
 
-    # Encoder for categorical features
-    cat_pipeline = Pipeline([
-        ('onehot', OneHotEncoder(categories=[range(n_categories)], handle_unknown='ignore', sparse_output=False)) # Use sparse_output=False for dense array
-    ])
+        X.append(input_seq)
+        y.append(target_seq)
 
-    # Combine pipelines using ColumnTransformer
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', num_pipeline, numerical_features),
-            ('cat', cat_pipeline, categorical_features)
-        ],
-        remainder='passthrough' # Keep other columns if any (none in this case)
-    )
+    return np.array(X), np.array(y)
 
-    # Fit and transform the data
-    # Important: Fit only on training data in a real scenario
-    # Here, we fit on all data for simplicity of demonstration
-    data_processed = preprocessor.fit_transform(raw_data)
-    print(f"Data shape after preprocessing (scaling/encoding): {data_processed.shape}")
+# Combine sequences from all machines
+all_X, all_y = [], []
+for m_df in data_per_machine:
+    X_m, y_m = create_sequences(m_df, SEQ_LENGTH, PRED_LENGTH, numerical_cols, target_indices)
+    if X_m.size > 0: # Check if sequences were created
+        all_X.append(X_m)
+        all_y.append(y_m)
 
-    # Get feature names after transformation (useful for understanding output)
-    feature_names_out = preprocessor.get_feature_names_out()
-    print(f"Feature names after transformation: {feature_names_out}")
+X = np.concatenate(all_X, axis=0)
+y = np.concatenate(all_y, axis=0)
 
-    # Calculate the total number of features after one-hot encoding
-    n_features_processed = data_processed.shape[1]
+# Convert to PyTorch tensors
+X = torch.tensor(X, dtype=torch.float32)
+y = torch.tensor(y, dtype=torch.float32)
 
-    # Create sequences
-    X, y = create_sequences(data_processed, seq_len, pred_len)
-    print(f"Created sequences: X shape {X.shape}, y shape {y.shape}") # X: (samples, seq_len, features), y: (samples, pred_len, features)
+print(f"Created sequences: X shape={X.shape}, y shape={y.shape}") # X: (n_sequences, seq_length, n_features+1), y: (n_sequences, pred_length, n_output_features)
 
-    # Split data (simple split for demo)
-    split_idx = int(len(X) * 0.8)
-    X_train, X_test = X[:split_idx], X[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
-    print(f"Train shapes: X={X_train.shape}, y={y_train.shape}")
-    print(f"Test shapes: X={X_test.shape}, y={y_test.shape}")
+# Split data (simple split for demonstration)
+split_idx = int(len(X) * 0.8)
+X_train, X_test = X[:split_idx], X[split_idx:]
+y_train, y_test = y[:split_idx], y[split_idx:]
 
-    # Convert to PyTorch tensors
-    X_train = torch.tensor(X_train, dtype=torch.float32)
-    y_train = torch.tensor(y_train, dtype=torch.float32)
-    X_test = torch.tensor(X_test, dtype=torch.float32)
-    y_test = torch.tensor(y_test, dtype=torch.float32)
+print(f"Train shapes: X={X_train.shape}, y={y_train.shape}")
+print(f"Test shapes: X={X_test.shape}, y={y_test.shape}")
+print("-" * 20)
 
-    return X_train, y_train, X_test, y_test, preprocessor, n_features_processed, feature_names_out
+# Create DataLoader
+class ManufacturingDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = X
+        self.y = y
 
-# --- 3. Transformer Model Definition ---
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+train_dataset = ManufacturingDataset(X_train, y_train)
+test_dataset = ManufacturingDataset(X_test, y_test)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+
+# 4. Transformer Model Definition
+# -------------------------------
 class PositionalEncoding(nn.Module):
     """Injects positional information into the input embeddings."""
     def __init__(self, d_model, dropout=0.1, max_len=5000):
@@ -159,7 +248,7 @@ class PositionalEncoding(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0).transpose(0, 1) # Shape: (max_len, 1, d_model)
-        self.register_buffer('pe', pe) # Makes 'pe' part of the model state, but not a parameter
+        self.register_buffer('pe', pe) # Not a model parameter
 
     def forward(self, x):
         """
@@ -170,349 +259,221 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 class TransformerForecaster(nn.Module):
-    """Transformer Encoder based model for time series forecasting."""
-    def __init__(self, input_dim, d_model, n_head, n_layers, dim_feedforward, dropout, output_dim):
+    def __init__(self, input_features, num_activities, d_model, nhead, num_encoder_layers,
+                 dim_feedforward, dropout, output_features, seq_length, pred_length):
         super(TransformerForecaster, self).__init__()
         self.d_model = d_model
+        self.seq_length = seq_length
+        self.pred_length = pred_length
+        self.output_features = output_features
 
-        # Input embedding layer (linear projection)
-        self.input_embedding = nn.Linear(input_dim, d_model)
+        # Embedding for the activity code (categorical feature)
+        self.activity_embedding = nn.Embedding(num_activities, d_model // 4) # Allocate part of d_model
+
+        # Linear layer to project combined input features to d_model
+        # Input features = (numerical features) + (embedding dim)
+        # Input features = (input_features - 1) + d_model // 4
+        combined_feature_dim = (input_features - 1) + (d_model // 4)
+        self.input_projection = nn.Linear(combined_feature_dim, d_model)
+
+        # Positional Encoding
         self.pos_encoder = PositionalEncoding(d_model, dropout)
 
-        # Transformer Encoder layers
-        encoder_layers = nn.TransformerEncoderLayer(d_model, n_head, dim_feedforward, dropout, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, n_layers)
+        # Transformer Encoder
+        encoder_layers = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_encoder_layers)
 
-        # Output layer to project back to the number of features * prediction length
-        # We want to predict all features for PRED_LEN steps ahead.
-        # Option 1: Predict sequence directly (requires reshaping later)
-        # self.output_layer = nn.Linear(d_model * SEQ_LEN, output_dim * PRED_LEN) # Predict all at once
-
-        # Option 2: Predict step-by-step or use final hidden state
-        # Using the output of the last time step of the encoder
-        self.output_layer = nn.Linear(d_model, output_dim) # Predicts features for one step
-
-        # Option 3: Use mean/max pooling over sequence dimension before output layer
-        # self.output_layer = nn.Linear(d_model, output_dim)
+        # Output layer to predict the target features for the prediction horizon
+        # We flatten the output of the transformer and predict all steps at once
+        self.output_linear = nn.Linear(d_model * seq_length, pred_length * output_features)
 
         self.init_weights()
 
     def init_weights(self):
         initrange = 0.1
-        self.input_embedding.weight.data.uniform_(-initrange, initrange)
-        self.output_layer.bias.data.zero_()
-        self.output_layer.weight.data.uniform_(-initrange, initrange)
+        self.activity_embedding.weight.data.uniform_(-initrange, initrange)
+        self.input_projection.weight.data.uniform_(-initrange, initrange)
+        self.input_projection.bias.data.zero_()
+        self.output_linear.weight.data.uniform_(-initrange, initrange)
+        self.output_linear.bias.data.zero_()
 
-    def _generate_square_subsequent_mask(self, sz):
-        """Generates a mask to prevent attention to future positions."""
-        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-        return mask
-
-    def forward(self, src, src_mask=None):
+    def forward(self, src):
         """
         Args:
-            src: Input sequence, shape [batch_size, seq_len, input_dim]
-            src_mask: Mask for the source sequence (optional)
+            src: Input tensor, shape [batch_size, seq_len, input_features]
+                 input_features includes activity_code + numerical features
         """
-        # 1. Embed input
-        # src shape: [batch_size, seq_len, input_dim]
-        src_embedded = self.input_embedding(src) * math.sqrt(self.d_model)
-        # src_embedded shape: [batch_size, seq_len, d_model]
+        # Separate activity code and numerical features
+        activity_codes = src[:, :, 0].long() # Shape: [batch_size, seq_len]
+        numerical_features = src[:, :, 1:]   # Shape: [batch_size, seq_len, num_numerical_features]
 
-        # 2. Add positional encoding
-        # Need shape [seq_len, batch_size, d_model] for pos_encoder
-        src_embedded = src_embedded.permute(1, 0, 2) # [seq_len, batch_size, d_model]
-        src_pos = self.pos_encoder(src_embedded)
-        # src_pos shape: [seq_len, batch_size, d_model]
+        # Embed activities
+        activity_embed = self.activity_embedding(activity_codes) # Shape: [batch_size, seq_len, d_model//4]
 
-        # 3. Pass through Transformer Encoder
-        # TransformerEncoder expects [seq_len, batch_size, d_model] if batch_first=False (default)
-        # Or [batch_size, seq_len, d_model] if batch_first=True
-        # Our encoder layer has batch_first=True
+        # Combine embedded activities and numerical features
+        combined_features = torch.cat((activity_embed, numerical_features), dim=-1) # Shape: [batch_size, seq_len, combined_feature_dim]
+
+        # Project to d_model
+        src_proj = self.input_projection(combined_features) # Shape: [batch_size, seq_len, d_model]
+        src_proj = src_proj * math.sqrt(self.d_model) # Scale embedding
+
+        # Add positional encoding (needs shape [seq_len, batch_size, d_model]) -> Transpose before PE
+        # Note: TransformerEncoderLayer expects batch_first=True, so input should be [batch_size, seq_len, d_model]
+        # However, PositionalEncoding expects [seq_len, batch_size, d_model].
+        # Let's adapt PositionalEncoding or the input flow. Adapting input flow:
+        src_permuted = src_proj.permute(1, 0, 2) # Shape: [seq_len, batch_size, d_model]
+        src_pos = self.pos_encoder(src_permuted)
         src_pos = src_pos.permute(1, 0, 2) # Back to [batch_size, seq_len, d_model]
 
-        # Generate mask if not provided (standard for forecasting)
-        if src_mask is None:
-            # Mask prevents attending to future positions within the input sequence
-            # Not strictly necessary if just using encoder output for prediction,
-            # but good practice if model might be adapted for autoregressive generation.
-            # For simple forecasting (fixed window -> fixed forecast), mask might not be needed.
-            # Let's include it for completeness.
-            # device = src.device
-            # src_mask = self._generate_square_subsequent_mask(src.size(1)).to(device)
-            pass # Let's try without mask first for simplicity in this setup
+        # Pass through Transformer Encoder
+        # src_mask = nn.Transformer.generate_square_subsequent_mask(self.seq_length).to(DEVICE) # Optional: If causality needed
+        # output = self.transformer_encoder(src_pos, mask=src_mask)
+        output = self.transformer_encoder(src_pos) # Shape: [batch_size, seq_len, d_model]
 
+        # Flatten the output and predict future steps
+        output_flat = output.reshape(output.size(0), -1) # Shape: [batch_size, seq_len * d_model]
+        prediction = self.output_linear(output_flat) # Shape: [batch_size, pred_length * output_features]
 
-        # Transformer Encoder expects mask shape [seq_len, seq_len]
-        encoder_output = self.transformer_encoder(src_pos, mask=src_mask)
-        # encoder_output shape: [batch_size, seq_len, d_model]
+        # Reshape prediction to [batch_size, pred_length, output_features]
+        prediction = prediction.view(output.size(0), self.pred_length, self.output_features)
 
-        # 4. Decode to output features
-        # Use the output corresponding to the *last* input time step to predict the future
-        # last_step_output = encoder_output[:, -1, :] # Shape: [batch_size, d_model]
-        # predictions = self.output_layer(last_step_output) # Shape: [batch_size, output_dim]
-        # This predicts only *one* step ahead based on the last input state.
+        return prediction
 
-        # To predict PRED_LEN steps, we can either:
-        # a) Apply the output layer to *all* output steps and take the last PRED_LEN ones (if model learned this mapping)
-        # b) Apply the output layer to the last step and use this as the first prediction, then feed back autoregressively (more complex)
-        # c) Modify the output layer to directly predict PRED_LEN steps from the final state or the full sequence.
+# Instantiate the model
+input_dim = X_train.shape[2] # Number of features in the input sequence (activity_code + numerical)
+model = TransformerForecaster(
+    input_features=input_dim,
+    num_activities=n_activities,
+    d_model=D_MODEL,
+    nhead=N_HEAD,
+    num_encoder_layers=N_LAYERS,
+    dim_feedforward=D_FF,
+    dropout=DROPOUT,
+    output_features=OUTPUT_FEATURES,
+    seq_length=SEQ_LENGTH,
+    pred_length=PRED_LENGTH
+).to(DEVICE)
 
-        # Let's try applying the linear layer to *all* time steps of the encoder output
-        # and assume the model learns to use the sequence context appropriately.
-        # We'll then select the *last* PRED_LEN outputs as our forecast.
-        # This is a simplification but common in some forecasting setups.
-        predictions = self.output_layer(encoder_output) # Shape: [batch_size, seq_len, output_dim]
+print("\n--- Model Architecture ---")
+print(model)
+num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Total Trainable Parameters: {num_params:,}")
+print("-" * 20)
 
-        # Return the predictions corresponding to the forecast horizon
-        # We assume the model learns to place the relevant forecast info in the final outputs.
-        # This is a modeling choice. A common alternative is to predict only the next step
-        # or use a decoder. For simplicity, we predict the whole output sequence length
-        # and expect the training forces the model to learn the mapping.
-        # We need the predictions for the *next* PRED_LEN steps, which aren't directly
-        # output here. Let's adjust the target handling or model structure.
+# 5. Training Loop
+# ----------------
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5) # Learning rate scheduler
 
-        # --- Revised approach: Predict PRED_LEN steps from the last hidden state ---
-        # Use the output corresponding to the *last* input time step
-        last_step_output = encoder_output[:, -1, :] # Shape: [batch_size, d_model]
+print("Starting training...")
+start_time = time.time()
 
-        # Modify output layer to predict PRED_LEN * output_dim features
-        # Reshape needed after prediction
-        # self.output_layer = nn.Linear(d_model, output_dim * PRED_LEN) # Define this in __init__
+for epoch in range(EPOCHS):
+    model.train()
+    epoch_loss = 0
+    epoch_start_time = time.time()
 
-        # If output_layer predicts only output_dim (one step):
-        # We need an autoregressive loop here for multi-step forecast, which adds complexity.
-
-        # --- Simplest approach for demo: Predict full target sequence directly ---
-        # Let's modify the output layer to predict the desired shape directly
-        # This requires changing the __init__ and potentially the loss calculation
-        # Let's stick to the idea of predicting `output_dim` features at each output step
-        # and train the model to predict the target sequence `y` shifted relative to `x`.
-        # The loss will compare `predictions` (shape B, S, F) with `y` (shape B, P, F).
-        # This requires `y` to be aligned with the *end* of the `predictions`.
-
-        # Let's return the full sequence output from the encoder passed through the final layer.
-        # The loss function will handle comparing the relevant parts.
-        return predictions # Shape: [batch_size, seq_len, output_dim]
-
-
-# --- 4. Training Loop ---
-def train_model(model, dataloader, criterion, optimizer, epoch, device, pred_len):
-    model.train()  # Set model to training mode
-    total_loss = 0.
-    start_time = time.time()
-
-    for batch, (X_batch, y_batch) in enumerate(dataloader):
-        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-        # X_batch shape: [batch_size, seq_len, n_features_processed]
-        # y_batch shape: [batch_size, pred_len, n_features_processed]
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(DEVICE), target.to(DEVICE)
 
         optimizer.zero_grad()
-        output = model(X_batch)
-        # output shape: [batch_size, seq_len, n_features_processed]
-
-        # We need to compare the *last* `pred_len` outputs of the model
-        # with the target `y_batch`.
-        loss = criterion(output[:, -pred_len:, :], y_batch)
-
+        output = model(data)
+        loss = criterion(output, target)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5) # Gradient clipping
         optimizer.step()
 
-        total_loss += loss.item()
+        epoch_loss += loss.item()
 
-        if batch % 50 == 0 and batch > 0:
-            lr = optimizer.param_groups[0]['lr']
-            ms_per_batch = (time.time() - start_time) * 1000 / (batch + 1)
-            cur_loss = total_loss / (batch + 1)
-            print(f'| epoch {epoch:3d} | {batch:5d}/{len(dataloader):5d} batches | '
-                  f'lr {lr:02.6f} | ms/batch {ms_per_batch:5.2f} | '
-                  f'loss {cur_loss:5.4f}')
+        # Optional: Print batch progress
+        # if batch_idx % 50 == 0:
+        #     print(f"  Epoch {epoch+1}/{EPOCHS} | Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.4f}")
 
-    epoch_loss = total_loss / len(dataloader)
-    elapsed = time.time() - start_time
-    print('-' * 89)
-    print(f'| end of epoch {epoch:3d} | time: {elapsed:5.2f}s | training loss {epoch_loss:5.4f}')
-    print('-' * 89)
-    return epoch_loss
+    avg_epoch_loss = epoch_loss / len(train_loader)
+    scheduler.step() # Update learning rate
+    epoch_duration = time.time() - epoch_start_time
 
-
-# --- Evaluation Function (Optional but Recommended) ---
-def evaluate_model(model, dataloader, criterion, device, pred_len):
-    model.eval() # Set model to evaluation mode
-    total_loss = 0.
+    # Evaluate on test set
+    model.eval()
+    test_loss = 0
     with torch.no_grad():
-        for X_batch, y_batch in dataloader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            output = model(X_batch)
-            loss = criterion(output[:, -pred_len:, :], y_batch)
-            total_loss += loss.item()
-    return total_loss / len(dataloader)
+        for data, target in test_loader:
+            data, target = data.to(DEVICE), target.to(DEVICE)
+            output = model(data)
+            test_loss += criterion(output, target).item()
+    avg_test_loss = test_loss / len(test_loader)
 
-# --- 5. Inference/Forecasting Function ---
-def forecast(model, input_sequence, preprocessor, device, n_features_processed, pred_len, feature_names_out):
-    """
-    Makes a forecast using the trained model.
+    print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_epoch_loss:.4f} | Test Loss: {avg_test_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f} | Time: {epoch_duration:.2f}s")
 
-    Args:
-        model: The trained PyTorch model.
-        input_sequence: The last `seq_len` data points (raw format, before preprocessing).
-                        Shape: (seq_len, n_features_raw)
-        preprocessor: The fitted scikit-learn preprocessor.
-        device: The torch device ('cpu' or 'cuda').
-        n_features_processed: Total number of features after preprocessing.
-        pred_len: The forecast horizon.
-        feature_names_out: List of feature names after preprocessing.
-
-    Returns:
-        forecast_raw: The forecast in the original data scale. Shape: (pred_len, n_features_raw)
-    """
-    model.eval() # Set model to evaluation mode
-
-    print("\n--- Starting Forecast ---")
-    print(f"Input sequence shape (raw): {input_sequence.shape}")
-
-    # 1. Preprocess the input sequence
-    input_processed = preprocessor.transform(input_sequence)
-    print(f"Input sequence shape (processed): {input_processed.shape}")
-
-    # 2. Convert to tensor and add batch dimension
-    input_tensor = torch.tensor(input_processed, dtype=torch.float32).unsqueeze(0).to(device) # Shape: [1, seq_len, n_features_processed]
-
-    # 3. Get model prediction
-    with torch.no_grad():
-        prediction = model(input_tensor) # Shape: [1, seq_len, n_features_processed]
-
-    # 4. Extract the forecast part (last pred_len steps of the output)
-    forecast_processed = prediction[0, -pred_len:, :].cpu().numpy() # Shape: [pred_len, n_features_processed]
-    print(f"Output forecast shape (processed): {forecast_processed.shape}")
-
-    # 5. Inverse transform the prediction
-    # Ensure the shape matches what the preprocessor expects for inverse_transform
-    # It usually expects the same number of columns it was fitted on.
-    # If forecast_processed has fewer columns (e.g., only predicted numerical), adjust accordingly.
-    # Here, forecast_processed should have n_features_processed columns.
-
-    # Need to handle numerical and categorical separately for inverse transform
-    num_feature_indices = [i for i, name in enumerate(feature_names_out) if name.startswith('num__')]
-    cat_feature_indices = [i for i, name in enumerate(feature_names_out) if name.startswith('cat__')]
-    n_num_features_processed = len(num_feature_indices)
-    n_cat_features_processed = len(cat_feature_indices) # This is n_categories due to one-hot
-
-    # Create a dummy array with the correct shape for inverse transform
-    dummy_array_for_inverse = np.zeros((pred_len, n_features_processed))
-    dummy_array_for_inverse[:, :] = forecast_processed # Fill with predicted values
-
-    # Inverse transform using the fitted preprocessor
-    forecast_raw = preprocessor.inverse_transform(dummy_array_for_inverse)
-    print(f"Output forecast shape (raw): {forecast_raw.shape}")
-
-    # Post-process categorical: convert one-hot back to labels
-    # The categorical part of forecast_raw will have the original single column
-    # The inverse_transform of OneHotEncoder might yield floats, find the argmax
-    # Note: inverse_transform handles this directly if pipelines are set up correctly.
-    # Let's assume forecast_raw[:, N_FEATURES_NUM] contains the predicted category index (possibly float).
-    # We might need to round or apply argmax if the inverse transform wasn't perfect for categorical.
-    # For simplicity, let's assume inverse_transform gives reasonable values.
-    # Round the categorical prediction
-    if N_FEATURES_CAT > 0:
-         forecast_raw[:, N_FEATURES_NUM] = np.round(forecast_raw[:, N_FEATURES_NUM]).astype(int)
-         # Clamp values to be within valid category range
-         forecast_raw[:, N_FEATURES_NUM] = np.clip(forecast_raw[:, N_FEATURES_NUM], 0, N_CATEGORIES - 1)
+total_training_time = time.time() - start_time
+print(f"\nTraining finished in {total_training_time:.2f} seconds.")
+print("-" * 20)
 
 
-    print("--- Forecast Complete ---")
-    return forecast_raw
+# 6. Inference/Forecasting Example
+# --------------------------------
+print("Performing inference on a sample from the test set...")
+model.eval()
 
+# Get a sample from the test set
+sample_idx = random.randint(0, len(X_test) - 1)
+input_sequence, true_target = test_dataset[sample_idx]
+input_sequence = input_sequence.unsqueeze(0).to(DEVICE) # Add batch dimension and move to device
+true_target = true_target.cpu().numpy() # Keep target on CPU for comparison
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    # 1. Generate Data
-    raw_data = generate_manufacturing_data(N_SAMPLES, N_FEATURES_NUM, N_CATEGORIES)
-    n_features_raw = raw_data.shape[1]
+# Make prediction
+with torch.no_grad():
+    prediction_norm = model(input_sequence) # Shape: [1, pred_length, output_features]
 
-    # 2. Preprocess Data
-    X_train, y_train, X_test, y_test, preprocessor, n_features_processed, feature_names_out = preprocess_data(
-        raw_data, N_FEATURES_NUM, N_CATEGORIES, SEQ_LEN, PRED_LEN
-    )
+# Inverse transform the prediction and the true target to original scale
+prediction_norm = prediction_norm.squeeze(0).cpu().numpy() # Remove batch dim, move to CPU
 
-    # Create DataLoaders
-    train_dataset = TensorDataset(X_train, y_train)
-    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+# Create dummy arrays with correct shape for inverse transform
+# Prediction needs shape (pred_length, num_numerical_features)
+# True target needs shape (pred_length, num_numerical_features)
+num_numerical_features = len(numerical_cols)
+pred_full = np.zeros((PRED_LENGTH, num_numerical_features))
+true_full = np.zeros((PRED_LENGTH, num_numerical_features))
 
-    test_dataset = TensorDataset(X_test, y_test)
-    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+# Place the predicted/true values into the correct columns
+pred_full[:, target_indices] = prediction_norm
+true_full[:, target_indices] = true_target
 
-    # 3. Initialize Model, Loss, Optimizer
-    model = TransformerForecaster(
-        input_dim=n_features_processed,
-        d_model=D_MODEL,
-        n_head=N_HEAD,
-        n_layers=N_LAYERS,
-        dim_feedforward=DIM_FEEDFORWARD,
-        dropout=DROPOUT,
-        output_dim=n_features_processed # Predict all processed features
-    ).to(DEVICE)
+# Inverse transform using the fitted scalers
+prediction_rescaled = np.zeros_like(pred_full)
+true_rescaled = np.zeros_like(true_full)
 
-    # Use MSELoss for simplicity, even with one-hot encoded categories.
-    # A combined loss (MSE for numerical, CrossEntropy for categorical) would be better
-    # but adds complexity to the output layer and loss calculation.
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5) # Learning rate scheduler
+for i, col in enumerate(numerical_cols):
+    if col in target_cols: # Only inverse transform columns that were predicted
+        col_idx_in_target = target_cols.index(col) # Find index in the output
+        prediction_rescaled[:, i] = scalers[col].inverse_transform(pred_full[:, i].reshape(-1, 1)).flatten()
+        true_rescaled[:, i] = scalers[col].inverse_transform(true_full[:, i].reshape(-1, 1)).flatten()
 
-    print("\n--- Starting Training ---")
-    # 4. Training Loop
-    for epoch in range(1, EPOCHS + 1):
-        train_loss = train_model(model, train_dataloader, criterion, optimizer, epoch, DEVICE, PRED_LEN)
-        val_loss = evaluate_model(model, test_dataloader, criterion, DEVICE, PRED_LEN)
-        print(f'| end of epoch {epoch:3d} | validation loss {val_loss:5.4f}')
-        print('-' * 89)
-        scheduler.step() # Adjust learning rate
+# Extract only the target columns for printing
+predicted_values = prediction_rescaled[:, target_indices]
+true_values = true_rescaled[:, target_indices]
 
-    print("--- Training Complete ---")
+# Print the last few steps of the input and the forecast
+print("\n--- Inference Example ---")
+print(f"Input Sequence (Last 5 steps, showing Activity Code and Normalized Sensor/Quality):")
+# Convert input back to numpy for easier printing
+input_sequence_np = input_sequence.squeeze(0).cpu().numpy()
+for i in range(max(0, SEQ_LENGTH - 5), SEQ_LENGTH):
+    activity_name = activity_encoder.inverse_transform([int(input_sequence_np[i, 0])])[0]
+    sensor1_norm = input_sequence_np[i, 1]
+    sensor2_norm = input_sequence_np[i, 2]
+    quality_norm = input_sequence_np[i, 3]
+    print(f"  Step {i-SEQ_LENGTH}: Act={activity_name:<12} S1_norm={sensor1_norm:.2f} S2_norm={sensor2_norm:.2f} Q_norm={quality_norm:.2f}")
 
-    # 5. Perform Inference on a sample from the test set
-    # Take the last sequence from the raw data as input for forecasting
-    # Ensure we have enough data points before the end
-    if len(raw_data) >= SEQ_LEN:
-        input_sequence_raw = raw_data[-SEQ_LEN:] # Last SEQ_LEN points
+print(f"\nForecast for next {PRED_LENGTH} steps (Rescaled):")
+print(f"Target Features: {target_cols}")
+print("       Predicted |    True")
+print("----------------------------")
+for i in range(PRED_LENGTH):
+    pred_str = f"[{predicted_values[i, 0]:>7.2f}, {predicted_values[i, 1]:>7.2f}]"
+    true_str = f"[{true_values[i, 0]:>7.2f}, {true_values[i, 1]:>7.2f}]"
+    print(f"Step +{i+1}: {pred_str} | {true_str}")
 
-        # Make the forecast
-        forecast_result_raw = forecast(
-            model,
-            input_sequence_raw,
-            preprocessor,
-            DEVICE,
-            n_features_processed,
-            PRED_LEN,
-            feature_names_out
-        )
-
-        print("\n--- Example Forecast (Raw Scale) ---")
-        print(f"Forecasting the next {PRED_LEN} steps:")
-        # Print header
-        header = "Step | " + " | ".join([f"Feat_{i}" for i in range(N_FEATURES_NUM)]) + " | MachineState"
-        print(header)
-        print("-" * len(header))
-        # Print forecast
-        for i in range(PRED_LEN):
-            num_vals = " | ".join([f"{forecast_result_raw[i, j]:.2f}" for j in range(N_FEATURES_NUM)])
-            cat_val = int(forecast_result_raw[i, N_FEATURES_NUM])
-            print(f"{i+1:4d} | {num_vals} | {cat_val:^12d}")
-
-        # Optional: Compare with actual values if available
-        if len(raw_data) >= SEQ_LEN + PRED_LEN:
-             actual_values = raw_data[-(SEQ_LEN + PRED_LEN):-PRED_LEN] # This indexing seems wrong
-             actual_values = raw_data[-PRED_LEN:] # The actual values following the input sequence
-             print("\n--- Actual Values for Comparison ---")
-             print(header)
-             print("-" * len(header))
-             for i in range(PRED_LEN):
-                 num_vals = " | ".join([f"{actual_values[i, j]:.2f}" for j in range(N_FEATURES_NUM)])
-                 cat_val = int(actual_values[i, N_FEATURES_NUM])
-                 print(f"{i+1:4d} | {num_vals} | {cat_val:^12d}")
-
-    else:
-        print("\nNot enough data points in raw_data to perform forecast with the specified SEQ_LEN.")
+print("-" * 20)
+print("Script finished.")
