@@ -53,7 +53,7 @@ AUX_LOSS_COEFF = 0.01
 
 # Training Params
 BATCH_SIZE = 32
-EPOCHS = 20
+EPOCHS = 3
 LEARNING_RATE = 1e-3
 ADAM_BETAS = (0.9, 0.98)
 ADAM_WEIGHT_DECAY = 1e-2
@@ -63,12 +63,12 @@ WARMUP_RATIO = 0.05
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 AMP_ENABLED = DEVICE.type == 'cuda'
 
-MODEL_SAVE_PATH = "foundation_timeseries_model_v6.pth"  # New version
-PREPROCESSOR_SAVE_PATH = "preprocessor_config_v6.npz"  # New version
+MODEL_SAVE_PATH = "foundation_timeseries_model_v6.pth"
+PREPROCESSOR_SAVE_PATH = "preprocessor_config_v6.npz"
 
-HUBER_DELTA = 1.0
-FOCAL_ALPHA_PARAM = 0.25
-FOCAL_GAMMA = 2.0
+HUBER_DELTA = 1.0  # For HuberLoss
+FOCAL_ALPHA_PARAM = 0.25  # For FocalLoss
+FOCAL_GAMMA = 2.0  # For FocalLoss
 
 JITTER_STRENGTH_RATIO = 0.03
 MAG_WARP_STRENGTH_RATIO = 0.05
@@ -129,7 +129,7 @@ class PositionalEncoding(nn.Module):
 class TemporalBlock(nn.Module):
     def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, dropout=0.1):
         super(TemporalBlock, self).__init__()
-        self.padding = (kernel_size - 1) * dilation  # For causal convolution by slicing output
+        self.padding = (kernel_size - 1) * dilation
 
         self.conv1 = nn.Conv1d(n_inputs, n_outputs, kernel_size, stride=stride, padding=self.padding, dilation=dilation)
         self.conv1 = nn.utils.parametrizations.weight_norm(self.conv1)
@@ -146,27 +146,17 @@ class TemporalBlock(nn.Module):
         self.relu_out = nn.ReLU()
 
     def forward(self, x):  # x: [Batch, Channels_in, SeqLen]
-        # Layer 1
         out = self.conv1(x)
         out = out[:, :, :-self.padding] if self.padding > 0 else out
         out = self.relu1(out)
         out = self.dropout1(out)
 
-        # Layer 2
         out = self.conv2(out)
         out = out[:, :, :-self.padding] if self.padding > 0 else out
         out = self.relu2(out)
         out = self.dropout2(out)
 
         res = x if self.downsample is None else self.downsample(x)
-        # Ensure residual has same length as output after causal slicing
-        if res.size(2) != out.size(
-                2):  # Should only happen if input x was longer than conv output (not typical with this padding)
-            # This case needs careful handling if stride > 1 or something unexpected.
-            # For stride=1 and causal slice, res length should match out length if downsample doesn't change length.
-            # If downsample is Conv1d(kernel_size=1), length is preserved.
-            pass  # Assume lengths match with current setup.
-
         return self.relu_out(out + res)
 
 
@@ -181,27 +171,26 @@ class PerSensorEncoderTCN(nn.Module):
         current_channels = proj_dim
         for i in range(num_levels):
             dilation_size = 2 ** i
-            # All TCN blocks output tcn_out_dim
-            tcn_blocks.append(TemporalBlock(current_channels, tcn_out_dim, kernel_size, stride=1,
+            out_channels_block = tcn_out_dim
+            tcn_blocks.append(TemporalBlock(current_channels, out_channels_block, kernel_size, stride=1,
                                             dilation=dilation_size, dropout=dropout))
-            current_channels = tcn_out_dim  # Subsequent blocks take tcn_out_dim as input
+            current_channels = out_channels_block
 
         self.tcn_network = nn.Sequential(*tcn_blocks)
         self.final_norm = nn.LayerNorm(tcn_out_dim)
 
     def forward(self, x):  # x: [Batch*MaxSensors, SeqLen, InputDim]
-        x = self.input_proj(x)  # -> [B*MS, SeqLen, ProjDim]
-        x = self.pos_encoder(x)  # -> [B*MS, SeqLen, ProjDim]
-
-        x = x.permute(0, 2, 1)  # -> [B*MS, ProjDim, SeqLen] for Conv1D
-        x = self.tcn_network(x)  # -> [B*MS, TcnOutDim, SeqLen]
-        x = x.permute(0, 2, 1)  # -> [B*MS, SeqLen, TcnOutDim]
+        x = self.input_proj(x)
+        x = self.pos_encoder(x)
+        x = x.permute(0, 2, 1)
+        x = self.tcn_network(x)
+        x = x.permute(0, 2, 1)
         x = self.final_norm(x)
         return x
 
 
 # --- Helper: Focal Loss ---
-class FocalLoss(nn.Module):  # Same as V5
+class FocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
         super(FocalLoss, self).__init__()
         self.alpha_param = alpha;
@@ -221,7 +210,7 @@ class FocalLoss(nn.Module):  # Same as V5
         return loss
 
 
-# --- Data Handling (same as V5) ---
+# --- Data Handling ---
 def get_max_sensors_from_files(file_paths):
     max_s = 0
     for fp in file_paths:
@@ -232,7 +221,7 @@ def get_max_sensors_from_files(file_paths):
     return min(max_s, MAX_SENSORS_CAP)
 
 
-class MultivariateTimeSeriesDataset(Dataset):  # Same as V5
+class MultivariateTimeSeriesDataset(Dataset):
     def __init__(self, data_dir, seq_len, pred_horizons, fail_horizons, rca_failure_lookahead, max_sensors_global):
         self.data_dir = data_dir;
         self.seq_len = seq_len;
@@ -308,7 +297,7 @@ class MultivariateTimeSeriesDataset(Dataset):  # Same as V5
 
 
 # --- Model Architecture (V6 with TCN) ---
-class InterSensorTransformer(nn.Module):  # Same as V5
+class InterSensorTransformer(nn.Module):
     def __init__(self, embed_dim, nhead, num_layers, max_sensors):
         super().__init__();
         self.pos_encoder_inter_sensor = nn.Parameter(torch.zeros(1, max_sensors, embed_dim))
@@ -323,7 +312,7 @@ class InterSensorTransformer(nn.Module):  # Same as V5
         return self.output_norm(x)
 
 
-class Expert(nn.Module):  # Same as V5
+class Expert(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super().__init__();
         self.fc = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, output_dim))
@@ -331,7 +320,7 @@ class Expert(nn.Module):  # Same as V5
     def forward(self, x): return self.fc(x)
 
 
-class GatingNetwork(nn.Module):  # Same as V5
+class GatingNetwork(nn.Module):
     def __init__(self, input_dim, num_experts):
         super().__init__();
         self.fc = nn.Linear(input_dim, num_experts)
@@ -339,7 +328,7 @@ class GatingNetwork(nn.Module):  # Same as V5
     def forward(self, x): return self.fc(x)
 
 
-class FoundationalTimeSeriesModelV6(nn.Module):
+class FoundationalTimeSeriesModelV6(nn.Module):  # Renamed to V6
     def __init__(self, max_sensors, seq_len,
                  sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim, tcn_levels, tcn_kernel_size, tcn_dropout,
                  # TCN params
@@ -353,7 +342,6 @@ class FoundationalTimeSeriesModelV6(nn.Module):
         self.moe_output_dim = moe_output_dim
         self.revin_layer = RevIN(num_features=max_sensors, affine=revin_affine)
 
-        # Using PerSensorEncoderTCN
         self.per_sensor_encoder = PerSensorEncoderTCN(sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim,
                                                       seq_len,
                                                       tcn_levels, tcn_kernel_size, tcn_dropout)
@@ -374,12 +362,12 @@ class FoundationalTimeSeriesModelV6(nn.Module):
         self.gating_rca = GatingNetwork(moe_global_input_dim, num_experts_per_task)
         self.expert_dropout = nn.Dropout(expert_dropout_rate)
 
-        final_combined_feat_dim_last_step = sensor_tcn_out_dim + transformer_d_model  # Uses TCN output dim
+        final_combined_feat_dim_last_step = sensor_tcn_out_dim + transformer_d_model
         self.pred_head = nn.Linear(final_combined_feat_dim_last_step + moe_output_dim, pred_horizons_len)
         self.fail_head = nn.Linear(moe_output_dim, fail_horizons_len)
         self.rca_head = nn.Linear(final_combined_feat_dim_last_step + moe_output_dim, 1)
 
-    def _apply_moe_switch(self, global_moe_input, gating_network, expert_pool):  # Same as V5
+    def _apply_moe_switch(self, global_moe_input, gating_network, expert_pool):
         gating_logits = gating_network(global_moe_input);
         router_probs = torch.softmax(gating_logits, dim=-1)
         chosen_expert_indices = torch.argmax(gating_logits, dim=-1)
@@ -400,9 +388,9 @@ class FoundationalTimeSeriesModelV6(nn.Module):
         x_reshaped_for_encoder = x_norm_for_encoder_input.reshape(batch_size * self.max_sensors, seq_len,
                                                                   SENSOR_INPUT_DIM)
 
-        sensor_temporal_features_flat = self.per_sensor_encoder(x_reshaped_for_encoder)  # Uses TCN now
+        sensor_temporal_features_flat = self.per_sensor_encoder(x_reshaped_for_encoder)
         sensor_temporal_features = sensor_temporal_features_flat.reshape(batch_size, self.max_sensors, seq_len,
-                                                                         SENSOR_TCN_OUT_DIM)  # SENSOR_TCN_OUT_DIM
+                                                                         SENSOR_TCN_OUT_DIM)
         sensor_temporal_features = sensor_temporal_features * sensor_mask.view(batch_size, self.max_sensors, 1, 1)
 
         pooled_sensor_features = torch.mean(sensor_temporal_features, dim=2)
@@ -443,9 +431,9 @@ class FoundationalTimeSeriesModelV6(nn.Module):
         return pred_abs_denorm, fail_logits, rca_logits, aux_loss_terms
 
 
-# --- Augmentation Functions (same as V5) ---
+# --- Augmentation Functions ---
 def augment_jitter(x, mask, strength=0.03):
-    if strength == 0: return x; noise = torch.normal(0., strength, x.shape, device=x.device)
+    if strength == 0: return x; noise = torch.normal(0., strength, x.shape, device=x.device)  # Simplified jitter
     return (x + noise) * mask.unsqueeze(1)
 
 
@@ -461,11 +449,11 @@ def augment_magnitude_warp(x, mask, strength=0.05, n_knots=4):
             curve = torch.from_numpy(curve_np).float().to(x.device).unsqueeze(-1)
             aug[i, :, mask[i] == 1.0] *= curve
         except:
-            pass
+            pass  # Skip if interp fails
     return aug
 
 
-# --- Training Loop (mostly same as V5, adjusted for V6 model) ---
+# --- Training Loop ---
 def train_model():
     print(f"Device: {DEVICE}, AMP: {AMP_ENABLED}");
     all_f = glob.glob(os.path.join(TRAIN_DIR, "*.csv")) + glob.glob(os.path.join(VALID_DIR, "*.csv"))
@@ -483,7 +471,7 @@ def train_model():
     valid_dl = DataLoader(valid_ds, BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=AMP_ENABLED) if len(
         valid_ds) > 0 else None
 
-    model = FoundationalTimeSeriesModelV6(  # Using V6
+    model = FoundationalTimeSeriesModelV6(
         max_sensors=max_s_overall, seq_len=SEQ_LEN,
         sensor_input_dim=SENSOR_INPUT_DIM, sensor_tcn_proj_dim=SENSOR_TCN_PROJ_DIM,
         sensor_tcn_out_dim=SENSOR_TCN_OUT_DIM,
@@ -508,9 +496,11 @@ def train_model():
 
     sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda);
     scaler = GradScaler(enabled=AMP_ENABLED)
-    huber_fn = nn.HuberLoss(HUBER_DELTA, reduction='none');
-    focal_elem = FocalLoss(FOCAL_ALPHA_PARAM, FOCAL_GAMMA, reduction='none');
-    focal_mean = FocalLoss(FOCAL_ALPHA_PARAM, FOCAL_GAMMA, reduction='mean')
+
+    # Corrected HuberLoss initialization
+    huber_fn = nn.HuberLoss(delta=HUBER_DELTA, reduction='none')
+    focal_elem = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='none')
+    focal_mean = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='mean')
     wp, wf, wr = 1.0, 1.0, 0.5
 
     for ep in range(EPOCHS):
@@ -542,7 +532,8 @@ def train_model():
                 Lf = focal_mean(f_logits, loss_ft)
                 Lr_un = focal_elem(r_logits, loss_rt)
                 Lr = (Lr_un * mask).sum() / mask.sum().clamp(min=1e-9)
-                Laux_b = sum(p[0].size(0) * torch.sum(p[0] * p[1]) for p in aux_terms.values()) * AUX_LOSS_COEFF
+                Laux_b = sum(NUM_EXPERTS_PER_TASK * torch.sum(fi_pi[0] * fi_pi[1]) for fi_pi in
+                             aux_terms.values()) * AUX_LOSS_COEFF
                 Lcomb = wp * Lp + wf * Lf + wr * Lr + Laux_b
             if torch.isnan(Lcomb) or torch.isinf(Lcomb):
                 print(f"NaN/Inf L. Skip. P:{Lp.item():.2f} F:{Lf.item():.2f} R:{Lr.item():.2f} Aux:{Laux_b.item():.2f}")
@@ -582,7 +573,8 @@ def train_model():
                             min=1e-9)
                         Lfv = focal_mean(f_log_v, f_tv)
                         Lrv = (focal_elem(r_log_v, r_tv) * mask_v).sum() / mask_v.sum().clamp(min=1e-9)
-                        Laux_v_b = sum(p[0].size(0) * torch.sum(p[0] * p[1]) for p in aux_v.values()) * AUX_LOSS_COEFF
+                        Laux_v_b = sum(NUM_EXPERTS_PER_TASK * torch.sum(fi_pi[0] * fi_pi[1]) for fi_pi in
+                                       aux_v.values()) * AUX_LOSS_COEFF
                         Lcomb_v = wp * Lpv + wf * Lfv + wr * Lrv + Laux_v_b
                     if not (torch.isnan(Lcomb_v) or torch.isinf(Lcomb_v)):
                         tot_Lv += Lcomb_v.item();
