@@ -12,9 +12,6 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from torch.cuda.amp import GradScaler, autocast  # For Mixed Precision
 
-# For Weight Normalization, ensure PyTorch version supports parametrizations (1.9+)
-# If older, from torch.nn.utils import weight_norm might be needed, but parametrizations is preferred.
-
 # --- Configuration ---
 # Data paths
 BASE_DATA_DIR = "../../data/time_series/1"
@@ -66,11 +63,11 @@ AMP_ENABLED = DEVICE.type == 'cuda'
 MODEL_SAVE_PATH = "foundation_timeseries_model_v6.pth"
 PREPROCESSOR_SAVE_PATH = "preprocessor_config_v6.npz"
 
-HUBER_DELTA = 1.0  # For HuberLoss
-FOCAL_ALPHA_PARAM = 0.25  # For FocalLoss
-FOCAL_GAMMA = 2.0  # For FocalLoss
+HUBER_DELTA = 1.0
+FOCAL_ALPHA_PARAM = 0.25
+FOCAL_GAMMA = 2.0
 
-JITTER_STRENGTH_RATIO = 0.03
+JITTER_STRENGTH_RATIO = 0.03  # This will be used as the std for noise
 MAG_WARP_STRENGTH_RATIO = 0.05
 MAG_WARP_KNOTS = 4
 MIXUP_PROB = 0.5
@@ -132,13 +129,19 @@ class TemporalBlock(nn.Module):
         self.padding = (kernel_size - 1) * dilation
 
         self.conv1 = nn.Conv1d(n_inputs, n_outputs, kernel_size, stride=stride, padding=self.padding, dilation=dilation)
-        self.conv1 = nn.utils.parametrizations.weight_norm(self.conv1)
+        try:  # Use newer parametrization if available
+            self.conv1 = nn.utils.parametrizations.weight_norm(self.conv1)
+        except AttributeError:  # Fallback for older PyTorch versions
+            self.conv1 = nn.utils.weight_norm(self.conv1)
         self.relu1 = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
 
         self.conv2 = nn.Conv1d(n_outputs, n_outputs, kernel_size, stride=stride, padding=self.padding,
                                dilation=dilation)
-        self.conv2 = nn.utils.parametrizations.weight_norm(self.conv2)
+        try:
+            self.conv2 = nn.utils.parametrizations.weight_norm(self.conv2)
+        except AttributeError:
+            self.conv2 = nn.utils.weight_norm(self.conv2)
         self.relu2 = nn.ReLU()
         self.dropout2 = nn.Dropout(dropout)
 
@@ -328,10 +331,9 @@ class GatingNetwork(nn.Module):
     def forward(self, x): return self.fc(x)
 
 
-class FoundationalTimeSeriesModelV6(nn.Module):  # Renamed to V6
+class FoundationalTimeSeriesModelV6(nn.Module):
     def __init__(self, max_sensors, seq_len,
                  sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim, tcn_levels, tcn_kernel_size, tcn_dropout,
-                 # TCN params
                  transformer_d_model, transformer_nhead, transformer_nlayers,
                  moe_global_input_dim, num_experts_per_task, moe_hidden_dim_expert, moe_output_dim, expert_dropout_rate,
                  pred_horizons_len, fail_horizons_len, revin_affine=True):
@@ -432,25 +434,35 @@ class FoundationalTimeSeriesModelV6(nn.Module):  # Renamed to V6
 
 
 # --- Augmentation Functions ---
-def augment_jitter(x, mask, strength=0.03):
-    if strength == 0: return x; noise = torch.normal(0., strength, x.shape, device=x.device)  # Simplified jitter
-    return (x + noise) * mask.unsqueeze(1)
+def augment_jitter(x_batch, sensor_mask, strength_ratio=0.03):
+    if strength_ratio == 0:
+        return x_batch
+    # Define noise only if strength_ratio > 0
+    noise = torch.normal(mean=0., std=strength_ratio, size=x_batch.shape, device=x_batch.device)
+    x_aug = x_batch + noise
+    # Ensure noise only affects active sensor positions by re-applying mask
+    return x_aug * sensor_mask.unsqueeze(1)
 
 
-def augment_magnitude_warp(x, mask, strength=0.05, n_knots=4):
-    if strength == 0 or n_knots <= 1: return x; aug = x.clone(); B, SL, _ = x.shape
+def augment_magnitude_warp(x_batch, sensor_mask, strength_ratio=0.05, num_knots=4):
+    if strength_ratio == 0 or num_knots <= 1: return x_batch
+    x_aug = x_batch.clone();
+    B, SL, _ = x_batch.shape
     for i in range(B):
-        if mask[i].sum() == 0: continue
-        t_k = torch.linspace(0, SL - 1, n_knots, device=x.device);
-        y_k = torch.normal(1., strength, (n_knots,), device=x.device)
-        x_c = torch.arange(SL, device=x.device).float()
+        if sensor_mask[i].sum() == 0: continue
+        t_knots = torch.linspace(0, SL - 1, num_knots, device=x_batch.device);
+        y_knots = torch.normal(1., strength_ratio, (num_knots,), device=x_batch.device)
+        x_coords = torch.arange(SL, device=x_batch.device).float()
         try:
-            curve_np = np.interp(x_c.cpu().numpy(), t_k.cpu().numpy(), y_k.cpu().numpy())
-            curve = torch.from_numpy(curve_np).float().to(x.device).unsqueeze(-1)
-            aug[i, :, mask[i] == 1.0] *= curve
-        except:
-            pass  # Skip if interp fails
-    return aug
+            warp_curve_np = np.interp(x_coords.cpu().numpy(), t_knots.cpu().numpy(), y_knots.cpu().numpy())
+            curve = torch.from_numpy(warp_curve_np).float().to(x_batch.device).unsqueeze(-1)
+            # Apply to active sensors of sample i, identified by sensor_mask
+            active_sensor_indices_for_sample = sensor_mask[i] == 1.0
+            x_aug[i, :, active_sensor_indices_for_sample] *= curve
+        except Exception as e:
+            # print(f"Magnitude warping interp failed for sample {i}: {e}") # Optional: for debugging
+            pass
+    return x_aug
 
 
 # --- Training Loop ---
@@ -497,8 +509,7 @@ def train_model():
     sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda);
     scaler = GradScaler(enabled=AMP_ENABLED)
 
-    # Corrected HuberLoss initialization
-    huber_fn = nn.HuberLoss(delta=HUBER_DELTA, reduction='none')
+    huber_fn = nn.HuberLoss(delta=HUBER_DELTA, reduction='none')  # Corrected initialization
     focal_elem = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='none')
     focal_mean = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='mean')
     wp, wf, wr = 1.0, 1.0, 0.5
@@ -536,7 +547,8 @@ def train_model():
                              aux_terms.values()) * AUX_LOSS_COEFF
                 Lcomb = wp * Lp + wf * Lf + wr * Lr + Laux_b
             if torch.isnan(Lcomb) or torch.isinf(Lcomb):
-                print(f"NaN/Inf L. Skip. P:{Lp.item():.2f} F:{Lf.item():.2f} R:{Lr.item():.2f} Aux:{Laux_b.item():.2f}")
+                print(
+                    f"NaN/Inf L. Skip. P:{Lp.item() if not torch.isnan(Lp) else 'NaN'} F:{Lf.item() if not torch.isnan(Lf) else 'NaN'} R:{Lr.item() if not torch.isnan(Lr) else 'NaN'} Aux:{Laux_b.item() if not torch.isnan(Laux_b) else 'NaN'}")
                 sched.step();
                 continue
             scaler.scale(Lcomb).backward();
