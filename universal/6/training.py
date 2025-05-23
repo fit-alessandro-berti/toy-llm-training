@@ -67,7 +67,7 @@ HUBER_DELTA = 1.0
 FOCAL_ALPHA_PARAM = 0.25
 FOCAL_GAMMA = 2.0
 
-JITTER_STRENGTH_RATIO = 0.03  # This will be used as the std for noise
+JITTER_STRENGTH_RATIO = 0.03
 MAG_WARP_STRENGTH_RATIO = 0.05
 MAG_WARP_KNOTS = 4
 MIXUP_PROB = 0.5
@@ -129,9 +129,9 @@ class TemporalBlock(nn.Module):
         self.padding = (kernel_size - 1) * dilation
 
         self.conv1 = nn.Conv1d(n_inputs, n_outputs, kernel_size, stride=stride, padding=self.padding, dilation=dilation)
-        try:  # Use newer parametrization if available
+        try:
             self.conv1 = nn.utils.parametrizations.weight_norm(self.conv1)
-        except AttributeError:  # Fallback for older PyTorch versions
+        except AttributeError:
             self.conv1 = nn.utils.weight_norm(self.conv1)
         self.relu1 = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
@@ -369,15 +369,20 @@ class FoundationalTimeSeriesModelV6(nn.Module):
         self.fail_head = nn.Linear(moe_output_dim, fail_horizons_len)
         self.rca_head = nn.Linear(final_combined_feat_dim_last_step + moe_output_dim, 1)
 
-    def _apply_moe_switch(self, global_moe_input, gating_network, expert_pool):
-        gating_logits = gating_network(global_moe_input);
+    def _apply_moe_switch(self, global_moe_input, gating_network, expert_pool):  # expert_pool is list of nn.Module
+        gating_logits = gating_network(global_moe_input)
         router_probs = torch.softmax(gating_logits, dim=-1)
         chosen_expert_indices = torch.argmax(gating_logits, dim=-1)
         one_hot_selection = F.one_hot(chosen_expert_indices, num_classes=len(expert_pool)).float()
+
+        # This computes all experts, then selects one. Not ideal for Switch speedup without custom kernels.
         all_expert_outputs = torch.stack([expert(global_moe_input) for expert in expert_pool], dim=1)
+
         moe_task_output = torch.sum(all_expert_outputs * one_hot_selection.unsqueeze(-1), dim=1)
-        if self.training: moe_task_output = self.expert_dropout(moe_task_output)
-        fi = one_hot_selection.mean(dim=0);
+        if self.training:
+            moe_task_output = self.expert_dropout(moe_task_output)
+
+        fi = one_hot_selection.mean(dim=0)
         Pi = router_probs.mean(dim=0)
         return moe_task_output, fi, Pi
 
@@ -407,16 +412,11 @@ class FoundationalTimeSeriesModelV6(nn.Module):
         active_sensors_per_batch = sensor_mask.sum(dim=1, keepdim=True).clamp(min=1)
         global_moe_input = global_moe_input_sum / active_sensors_per_batch
 
-        expert_outputs_all_forecast = torch.stack([exp(global_moe_input) for exp in self.experts_forecast], dim=1)
-        expert_outputs_all_fail = torch.stack([exp(global_moe_input) for exp in self.experts_fail], dim=1)
-        expert_outputs_all_rca = torch.stack([exp(global_moe_input) for exp in self.experts_rca], dim=1)
-
         moe_forecast_output, fi_f, Pi_f = self._apply_moe_switch(global_moe_input, self.gating_forecast,
-                                                                 expert_outputs_all_forecast)
+                                                                 self.experts_forecast)
         moe_fail_output, fi_fail, Pi_fail = self._apply_moe_switch(global_moe_input, self.gating_fail,
-                                                                   expert_outputs_all_fail)
-        moe_rca_output, fi_rca, Pi_rca = self._apply_moe_switch(global_moe_input, self.gating_rca,
-                                                                expert_outputs_all_rca)
+                                                                   self.experts_fail)
+        moe_rca_output, fi_rca, Pi_rca = self._apply_moe_switch(global_moe_input, self.gating_rca, self.experts_rca)
         aux_loss_terms = {"forecast": (fi_f, Pi_f), "fail": (fi_fail, Pi_fail), "rca": (fi_rca, Pi_rca)}
 
         final_features_last_step = final_combined_features[:, :, -1, :]
@@ -437,10 +437,8 @@ class FoundationalTimeSeriesModelV6(nn.Module):
 def augment_jitter(x_batch, sensor_mask, strength_ratio=0.03):
     if strength_ratio == 0:
         return x_batch
-    # Define noise only if strength_ratio > 0
     noise = torch.normal(mean=0., std=strength_ratio, size=x_batch.shape, device=x_batch.device)
     x_aug = x_batch + noise
-    # Ensure noise only affects active sensor positions by re-applying mask
     return x_aug * sensor_mask.unsqueeze(1)
 
 
@@ -456,11 +454,9 @@ def augment_magnitude_warp(x_batch, sensor_mask, strength_ratio=0.05, num_knots=
         try:
             warp_curve_np = np.interp(x_coords.cpu().numpy(), t_knots.cpu().numpy(), y_knots.cpu().numpy())
             curve = torch.from_numpy(warp_curve_np).float().to(x_batch.device).unsqueeze(-1)
-            # Apply to active sensors of sample i, identified by sensor_mask
             active_sensor_indices_for_sample = sensor_mask[i] == 1.0
             x_aug[i, :, active_sensor_indices_for_sample] *= curve
-        except Exception as e:
-            # print(f"Magnitude warping interp failed for sample {i}: {e}") # Optional: for debugging
+        except Exception:
             pass
     return x_aug
 
@@ -509,7 +505,7 @@ def train_model():
     sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda);
     scaler = GradScaler(enabled=AMP_ENABLED)
 
-    huber_fn = nn.HuberLoss(delta=HUBER_DELTA, reduction='none')  # Corrected initialization
+    huber_fn = nn.HuberLoss(delta=HUBER_DELTA, reduction='none')
     focal_elem = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='none')
     focal_mean = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='mean')
     wp, wf, wr = 1.0, 1.0, 0.5
@@ -548,7 +544,7 @@ def train_model():
                 Lcomb = wp * Lp + wf * Lf + wr * Lr + Laux_b
             if torch.isnan(Lcomb) or torch.isinf(Lcomb):
                 print(
-                    f"NaN/Inf L. Skip. P:{Lp.item() if not torch.isnan(Lp) else 'NaN'} F:{Lf.item() if not torch.isnan(Lf) else 'NaN'} R:{Lr.item() if not torch.isnan(Lr) else 'NaN'} Aux:{Laux_b.item() if not torch.isnan(Laux_b) else 'NaN'}")
+                    f"NaN/Inf L. Skip. P:{Lp.item() if not (torch.isinf(Lp) or torch.isnan(Lp)) else 'NaN/Inf'} F:{Lf.item() if not (torch.isinf(Lf) or torch.isnan(Lf)) else 'NaN/Inf'} R:{Lr.item() if not (torch.isinf(Lr) or torch.isnan(Lr)) else 'NaN/Inf'} Aux:{Laux_b.item() if not (torch.isinf(Laux_b) or torch.isnan(Laux_b)) else 'NaN/Inf'}")
                 sched.step();
                 continue
             scaler.scale(Lcomb).backward();
