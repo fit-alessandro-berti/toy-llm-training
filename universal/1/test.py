@@ -10,7 +10,7 @@ from sklearn.preprocessing import StandardScaler
 
 # --- Configuration (MUST MATCH TRAINING SCRIPT) ---
 # Data paths
-BASE_DATA_DIR = "generated_time_series_data"
+BASE_DATA_DIR = "../../data/time_series/1"
 VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")  # Test on VALIDATION data
 
 # Model & Training Parameters (from training script)
