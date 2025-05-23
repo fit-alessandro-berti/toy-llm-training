@@ -34,13 +34,13 @@ CNN_LAYERS = 3  # Number of CausalConv1D blocks
 CNN_DILATION_BASE = 2
 
 # II. Inter-sensor Representation
-TRANSFORMER_INPUT_DIM_FROM_CNN = SENSOR_CNN_OUT_DIM  # Input to InterSensorTransformer from pooled CNN features
-TRANSFORMER_DIM = 64  # Output dim of InterSensorTransformer (cross-sensor context)
+# SENSOR_CNN_OUT_DIM (32) is the input to the projection layer before InterSensorTransformer
+TRANSFORMER_D_MODEL = 64  # Core operational dimension of InterSensorTransformer and its output.
 TRANSFORMER_NHEAD = 4
 TRANSFORMER_NLAYERS = 2
 
 # III. Mixture-of-Experts (MoE)
-MOE_GLOBAL_INPUT_DIM = TRANSFORMER_DIM  # Global context for MoE gating will be pooled cross_sensor_context
+MOE_GLOBAL_INPUT_DIM = TRANSFORMER_D_MODEL  # Global context for MoE gating (should be 64)
 MOE_HIDDEN_DIM_EXPERT = 128  # Hidden dim within each expert MLP
 NUM_EXPERTS = 4
 MOE_OUTPUT_DIM = 64  # Output dim of each expert, and thus the combined MoE output
@@ -105,7 +105,6 @@ class FocalLoss(nn.Module):
         bce_loss = self.bce_with_logits(inputs, targets)
         pt = torch.exp(-bce_loss)
 
-        # Calculate alpha_t dynamically based on targets
         alpha_t = torch.where(targets == 1, self.alpha, 1.0 - self.alpha).to(inputs.device)
         focal_weight = alpha_t * (1 - pt) ** self.gamma
 
@@ -115,7 +114,7 @@ class FocalLoss(nn.Module):
             return loss.mean()
         elif self.reduction == 'sum':
             return loss.sum()
-        else:
+        else:  # 'none'
             return loss
 
 
@@ -170,13 +169,6 @@ class MultivariateTimeSeriesDataset(Dataset):
             self.data_cache.append(
                 {"features": features, "failure_flags": failure_flags, "num_actual_sensors": num_actual_sensors})
             max_lookahead = max(max(self.pred_horizons), max(self.fail_horizons), self.rca_failure_lookahead)
-            # Ensure enough data for sequence + max prediction/failure horizon
-            # The +1 is important for target indexing (e.g. t+h-1 for h=1 means t, which is covered by seq_len for last value)
-            # So, length needed is seq_len for input, and max_lookahead for the furthest target.
-            # Total length of a slice needed: seq_len + max_lookahead -1 (for value at that step) or +max_lookahead (if window for failure)
-            # The current check is `len(df) - self.seq_len - max_lookahead + 1` which means last window starts at
-            # `len(df) - self.seq_len - max_lookahead`. This window ends at `len(df) - max_lookahead -1`.
-            # The furthest target is at `len(df) - max_lookahead -1 + max_lookahead = len(df) -1`. This is correct.
             for i in range(len(df) - self.seq_len - max_lookahead + 1):
                 self.window_indices.append((file_idx, i))
         print(f"Loaded {len(self.data_cache)} files, created {len(self.window_indices)} windows.")
@@ -230,10 +222,10 @@ class MultivariateTimeSeriesDataset(Dataset):
             if failure_sub_window_features.shape[0] > 0:
                 current_input_window_features = features_full[window_start_idx:window_start_idx + self.seq_len,
                                                 :num_actual_sensors]
-                if current_input_window_features.shape[0] > 0:  # Should always be true due to window length
+                if current_input_window_features.shape[0] > 0:
                     input_means = np.mean(current_input_window_features, axis=0)
                     input_stds = np.std(current_input_window_features, axis=0)
-                    input_stds[input_stds < 1e-6] = 1e-6  # Avoid division by zero for constant sensors
+                    input_stds[input_stds < 1e-6] = 1e-6
                     for s_idx in range(num_actual_sensors):
                         if np.any(np.abs(failure_sub_window_features[:, s_idx] - input_means[s_idx]) > 3 * input_stds[
                             s_idx]):
@@ -264,8 +256,8 @@ class PerSensorEncoderCNN(nn.Module):
             current_dim_manual = out_d
 
     def forward(self, x):  # x: [Batch*MaxSensors, SeqLen, InputDim=1]
-        x = self.input_proj(x)  # -> [B*MS, SeqLen, ProjDim]
-        x = self.pos_encoder(x)  # -> [B*MS, SeqLen, ProjDim]
+        x = self.input_proj(x)
+        x = self.pos_encoder(x)
 
         x = x.permute(0, 2, 1)  # -> [B*MS, ProjDim, SeqLen] for Conv1D
         for layer in self.manual_cnn_layers:
@@ -275,14 +267,14 @@ class PerSensorEncoderCNN(nn.Module):
 
 
 class InterSensorTransformer(nn.Module):
-    def __init__(self, embed_dim, nhead, num_layers, max_sensors):
+    def __init__(self, embed_dim, nhead, num_layers, max_sensors):  # embed_dim is the d_model
         super().__init__()
-        self.pos_encoder_inter_sensor = nn.Parameter(torch.zeros(1, max_sensors, embed_dim))  # Renamed for clarity
+        self.pos_encoder_inter_sensor = nn.Parameter(torch.zeros(1, max_sensors, embed_dim))
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=nhead, batch_first=True,
                                                    dim_feedforward=embed_dim * 2)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-    def forward(self, x, src_key_padding_mask):  # x: [Batch, MaxSensors, EmbedDim]
+    def forward(self, x, src_key_padding_mask):
         x = x + self.pos_encoder_inter_sensor[:, :x.size(1), :]
         return self.transformer_encoder(x, src_key_padding_mask=src_key_padding_mask)
 
@@ -300,14 +292,15 @@ class GatingNetwork(nn.Module):
         super().__init__()
         self.fc = nn.Linear(input_dim, num_experts)
 
-    def forward(self, x): return self.fc(x)  # Raw logits for top-k
+    def forward(self, x): return self.fc(x)
 
 
 class FoundationalTimeSeriesModelV2(nn.Module):
     def __init__(self, max_sensors, seq_len,
                  sensor_input_dim, sensor_cnn_proj_dim, sensor_cnn_out_dim, cnn_layers, cnn_kernel_size,
                  cnn_dilation_base,
-                 transformer_input_dim_from_cnn, transformer_dim, transformer_nhead, transformer_nlayers,
+                 transformer_d_model, transformer_nhead, transformer_nlayers,
+                 # Changed from transformer_input_dim_from_cnn
                  moe_global_input_dim, moe_hidden_dim_expert, num_experts, moe_output_dim, moe_top_k,
                  pred_horizons_len, fail_horizons_len):
         super().__init__()
@@ -321,15 +314,20 @@ class FoundationalTimeSeriesModelV2(nn.Module):
             cnn_layers, cnn_kernel_size, cnn_dilation_base
         )
 
-        if sensor_cnn_out_dim != transformer_input_dim_from_cnn:
-            self.cnn_to_transformer_proj = nn.Linear(sensor_cnn_out_dim, transformer_input_dim_from_cnn)
+        # Projection from SENSOR_CNN_OUT_DIM to TRANSFORMER_D_MODEL for InterSensorTransformer input
+        if sensor_cnn_out_dim != transformer_d_model:
+            self.pooled_to_transformer_dim_proj = nn.Linear(sensor_cnn_out_dim, transformer_d_model)
         else:
-            self.cnn_to_transformer_proj = nn.Identity()
+            self.pooled_to_transformer_dim_proj = nn.Identity()
 
         self.inter_sensor_transformer = InterSensorTransformer(
-            transformer_input_dim_from_cnn, transformer_nhead, transformer_nlayers, max_sensors
+            embed_dim=transformer_d_model,  # InterSensorTransformer operates with transformer_d_model
+            nhead=transformer_nhead,
+            num_layers=transformer_nlayers,
+            max_sensors=max_sensors
         )
 
+        # Experts and Gating Networks expect MOE_GLOBAL_INPUT_DIM (which should be transformer_d_model)
         self.experts = nn.ModuleList([
             Expert(moe_global_input_dim, moe_hidden_dim_expert, moe_output_dim) for _ in range(num_experts)
         ])
@@ -337,7 +335,8 @@ class FoundationalTimeSeriesModelV2(nn.Module):
         self.gating_fail = GatingNetwork(moe_global_input_dim, num_experts)
         self.gating_rca = GatingNetwork(moe_global_input_dim, num_experts)
 
-        final_combined_feat_dim_last_step = sensor_cnn_out_dim + transformer_dim
+        # Output of InterSensorTransformer is transformer_d_model
+        final_combined_feat_dim_last_step = sensor_cnn_out_dim + transformer_d_model
 
         self.pred_head = nn.Linear(final_combined_feat_dim_last_step + moe_output_dim, pred_horizons_len)
         self.fail_head = nn.Linear(moe_output_dim, fail_horizons_len)
@@ -357,29 +356,29 @@ class FoundationalTimeSeriesModelV2(nn.Module):
     def forward(self, x_features, sensor_mask):
         batch_size, seq_len, _ = x_features.shape
 
-        x_permuted = x_features.permute(0, 2, 1).unsqueeze(-1)  # [B, MaxSensors, SeqLen, SensorInputDim=1]
-        # Corrected line: use reshape instead of view
+        x_permuted = x_features.permute(0, 2, 1).unsqueeze(-1)
         x_reshaped = x_permuted.reshape(batch_size * self.max_sensors, seq_len, SENSOR_INPUT_DIM)
 
         sensor_temporal_features_flat = self.per_sensor_encoder(x_reshaped)
-        # Use reshape for robustness here as well
         sensor_temporal_features = sensor_temporal_features_flat.reshape(batch_size, self.max_sensors, seq_len,
                                                                          SENSOR_CNN_OUT_DIM)
         sensor_temporal_features = sensor_temporal_features * sensor_mask.view(batch_size, self.max_sensors, 1, 1)
 
-        pooled_sensor_features = torch.mean(sensor_temporal_features, dim=2)
-        pooled_sensor_features = self.cnn_to_transformer_proj(pooled_sensor_features)
+        pooled_sensor_features = torch.mean(sensor_temporal_features, dim=2)  # [B, MaxSensors, SENSOR_CNN_OUT_DIM]
+        projected_for_inter_sensor = self.pooled_to_transformer_dim_proj(
+            pooled_sensor_features)  # [B, MaxSensors, TRANSFORMER_D_MODEL]
 
         transformer_padding_mask = (sensor_mask == 0)
-        cross_sensor_context = self.inter_sensor_transformer(pooled_sensor_features, transformer_padding_mask)
+        cross_sensor_context = self.inter_sensor_transformer(projected_for_inter_sensor,
+                                                             transformer_padding_mask)  # [B, MaxSensors, TRANSFORMER_D_MODEL]
         cross_sensor_context = cross_sensor_context * sensor_mask.unsqueeze(-1)
 
-        expanded_cross_sensor_context = cross_sensor_context.unsqueeze(2).expand(-1, -1, seq_len, -1)
+        expanded_cross_sensor_context = cross_sensor_context.unsqueeze(2).expand(-1, -1, seq_len, TRANSFORMER_D_MODEL)
         final_combined_features = torch.cat([sensor_temporal_features, expanded_cross_sensor_context], dim=-1)
 
         global_moe_input_sum = (cross_sensor_context * sensor_mask.unsqueeze(-1)).sum(dim=1)
         active_sensors_per_batch = sensor_mask.sum(dim=1, keepdim=True).clamp(min=1)
-        global_moe_input = global_moe_input_sum / active_sensors_per_batch
+        global_moe_input = global_moe_input_sum / active_sensors_per_batch  # [B, TRANSFORMER_D_MODEL]
 
         expert_outputs_all = torch.stack([exp(global_moe_input) for exp in self.experts], dim=1)
 
@@ -429,7 +428,7 @@ def train_model():
         sensor_input_dim=SENSOR_INPUT_DIM, sensor_cnn_proj_dim=SENSOR_CNN_PROJ_DIM,
         sensor_cnn_out_dim=SENSOR_CNN_OUT_DIM,
         cnn_layers=CNN_LAYERS, cnn_kernel_size=CNN_KERNEL_SIZE, cnn_dilation_base=CNN_DILATION_BASE,
-        transformer_input_dim_from_cnn=TRANSFORMER_INPUT_DIM_FROM_CNN, transformer_dim=TRANSFORMER_DIM,
+        transformer_d_model=TRANSFORMER_D_MODEL,  # Pass TRANSFORMER_D_MODEL here
         transformer_nhead=TRANSFORMER_NHEAD, transformer_nlayers=TRANSFORMER_NLAYERS,
         moe_global_input_dim=MOE_GLOBAL_INPUT_DIM, moe_hidden_dim_expert=MOE_HIDDEN_DIM_EXPERT,
         num_experts=NUM_EXPERTS, moe_output_dim=MOE_OUTPUT_DIM, moe_top_k=MOE_TOP_K,
@@ -439,7 +438,8 @@ def train_model():
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
     huber_loss_fn = nn.HuberLoss(delta=HUBER_DELTA, reduction='none')
-    focal_loss_fn = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, reduction='none')
+    focal_loss_fn_elementwise = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, reduction='none')
+    focal_loss_fn_mean = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, reduction='mean')
 
     w_pred, w_fail, w_rca = 1.0, 1.0, 0.5
 
@@ -458,29 +458,28 @@ def train_model():
             pred_delta_output, fail_output_logits, rca_output_logits = model(input_features, sensor_mask)
 
             loss_pred_unmasked = huber_loss_fn(pred_delta_output, pred_delta_targets)
-            active_pred_elements = sensor_mask.sum().clamp(min=1) * len(PRED_HORIZONS)
-            loss_pred = (loss_pred_unmasked * sensor_mask.unsqueeze(-1)).sum() / active_pred_elements.clamp(
-                min=1e-9)  # Avoid div by zero
+            active_pred_elements = sensor_mask.sum().clamp(min=1) * len(PRED_HORIZONS)  # Denominator for mean
+            loss_pred = (loss_pred_unmasked * sensor_mask.unsqueeze(-1)).sum() / active_pred_elements.clamp(min=1e-9)
 
-            loss_fail_unmasked = focal_loss_fn(fail_output_logits, fail_targets)
-            loss_fail = loss_fail_unmasked.mean()
+            loss_fail = focal_loss_fn_mean(fail_output_logits, fail_targets)  # Uses reduction='mean' internally
 
-            loss_rca_unmasked = focal_loss_fn(rca_output_logits, rca_targets)
-            loss_rca = (loss_rca_unmasked * sensor_mask).sum() / sensor_mask.sum().clamp(min=1e-9)  # Avoid div by zero
+            loss_rca_unmasked = focal_loss_fn_elementwise(rca_output_logits, rca_targets)
+            loss_rca = (loss_rca_unmasked * sensor_mask).sum() / sensor_mask.sum().clamp(min=1e-9)
 
             combined_loss = w_pred * loss_pred + w_fail * loss_fail + w_rca * loss_rca
             if torch.isnan(combined_loss) or torch.isinf(combined_loss):
                 print(f"NaN/Inf loss detected at Epoch {epoch + 1}, Batch {batch_idx + 1}. Skipping batch.")
-                print(
-                    f"P:{loss_pred.item() if not torch.isnan(loss_pred) else 'NaN'} F:{loss_fail.item() if not torch.isnan(loss_fail) else 'NaN'} R:{loss_rca.item() if not torch.isnan(loss_rca) else 'NaN'}")
+                print(f"P:{loss_pred.item() if not (torch.isnan(loss_pred) or torch.isinf(loss_pred)) else 'NaN/Inf'} "
+                      f"F:{loss_fail.item() if not (torch.isnan(loss_fail) or torch.isinf(loss_fail)) else 'NaN/Inf'} "
+                      f"R:{loss_rca.item() if not (torch.isnan(loss_rca) or torch.isinf(loss_rca)) else 'NaN/Inf'}")
                 continue
             combined_loss.backward()
             optimizer.step()
 
             total_loss_train += combined_loss.item()
-            total_pred_loss_train += loss_pred.item() if not torch.isnan(loss_pred) else 0
-            total_fail_loss_train += loss_fail.item() if not torch.isnan(loss_fail) else 0
-            total_rca_loss_train += loss_rca.item() if not torch.isnan(loss_rca) else 0
+            total_pred_loss_train += loss_pred.item() if not (torch.isnan(loss_pred) or torch.isinf(loss_pred)) else 0
+            total_fail_loss_train += loss_fail.item() if not (torch.isnan(loss_fail) or torch.isinf(loss_fail)) else 0
+            total_rca_loss_train += loss_rca.item() if not (torch.isnan(loss_rca) or torch.isinf(loss_rca)) else 0
 
             if batch_idx > 0 and batch_idx % (len(train_loader) // 4 if len(train_loader) > 4 else 1) == 0:
                 print(
@@ -506,16 +505,20 @@ def train_model():
                     active_pred_elements_val = sensor_mask.sum().clamp(min=1) * len(PRED_HORIZONS)
                     loss_pred_val = (huber_loss_fn(pred_delta_output, pred_delta_targets) * sensor_mask.unsqueeze(
                         -1)).sum() / active_pred_elements_val.clamp(min=1e-9)
-                    loss_fail_val = focal_loss_fn(fail_output_logits, fail_targets).mean()
-                    loss_rca_val = (focal_loss_fn(rca_output_logits,
-                                                  rca_targets) * sensor_mask).sum() / sensor_mask.sum().clamp(min=1e-9)
+                    loss_fail_val = focal_loss_fn_mean(fail_output_logits, fail_targets)  # Uses reduction='mean'
+                    loss_rca_val = (focal_loss_fn_elementwise(rca_output_logits,
+                                                              rca_targets) * sensor_mask).sum() / sensor_mask.sum().clamp(
+                        min=1e-9)
 
                     combined_loss_val = w_pred * loss_pred_val + w_fail * loss_fail_val + w_rca * loss_rca_val
                     if not (torch.isnan(combined_loss_val) or torch.isinf(combined_loss_val)):
                         total_loss_val += combined_loss_val.item()
-                        total_pred_loss_val += loss_pred_val.item() if not torch.isnan(loss_pred_val) else 0
-                        total_fail_loss_val += loss_fail_val.item() if not torch.isnan(loss_fail_val) else 0
-                        total_rca_loss_val += loss_rca_val.item() if not torch.isnan(loss_rca_val) else 0
+                        total_pred_loss_val += loss_pred_val.item() if not (
+                                    torch.isnan(loss_pred_val) or torch.isinf(loss_pred_val)) else 0
+                        total_fail_loss_val += loss_fail_val.item() if not (
+                                    torch.isnan(loss_fail_val) or torch.isinf(loss_fail_val)) else 0
+                        total_rca_loss_val += loss_rca_val.item() if not (
+                                    torch.isnan(loss_rca_val) or torch.isinf(loss_rca_val)) else 0
 
             num_b_val = max(1, len(valid_loader))
             print(
