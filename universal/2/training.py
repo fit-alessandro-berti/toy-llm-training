@@ -13,7 +13,7 @@ from sklearn.preprocessing import StandardScaler
 
 # --- Configuration ---
 # Data paths
-BASE_DATA_DIR = "generated_time_series_data"
+BASE_DATA_DIR = "../../data/time_series/1"
 TRAIN_DIR = os.path.join(BASE_DATA_DIR, "TRAINING")
 VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")
 
