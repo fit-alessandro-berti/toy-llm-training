@@ -13,9 +13,9 @@ from torch.cuda.amp import GradScaler, autocast
 
 # --- Configuration ---
 # Data paths
-BASE_DATA_DIR = "../../data/time_series/1"  # Example, adjust if needed
-TRAIN_DIR = os.path.join(BASE_DATA_DIR, "TRAINING")  # <<< SET THIS
-VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")  # <<< SET THIS
+BASE_DATA_DIR = "../../data/time_series/1"
+TRAIN_DIR = os.path.join(BASE_DATA_DIR, "TRAINING")
+VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")
 
 # Model & Task Parameters
 SEQ_LEN = 64
@@ -40,17 +40,16 @@ TRANSFORMER_NHEAD = 4
 TRANSFORMER_NLAYERS = 2
 
 # III. Mixture-of-Experts (MoE) - Refactored
-NUM_SHARED_EXPERTS = 8  # Changed from NUM_EXPERTS_PER_TASK
-MOE_EXPERT_INPUT_DIM = TRANSFORMER_D_MODEL  # Experts will take transformer output directly or mean of it
+NUM_SHARED_EXPERTS = 8
+MOE_EXPERT_INPUT_DIM = TRANSFORMER_D_MODEL
 MOE_HIDDEN_DIM_EXPERT = 128
 MOE_OUTPUT_DIM = 64
-# EXPERT_DROPOUT_RATE = 0.1 # Dropout is not in the suggested _apply_moe_topk, consider adding inside expert if needed
 
 # New MoE Parameters
 MOE_TOP_K = 2
 MOE_NOISE_STD = 1.0
-AUX_LOSS_COEFF = 0.01  # Load balancing loss coefficient (existing)
-ENTROPY_REG_COEFF = 0.01  # For entropy regularization on gate logits
+AUX_LOSS_COEFF = 0.01
+ENTROPY_REG_COEFF = 0.01
 
 # Training Parameters
 BATCH_SIZE = 32
@@ -64,8 +63,8 @@ WARMUP_RATIO = 0.05
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 AMP_ENABLED = DEVICE.type == 'cuda'
 
-MODEL_SAVE_PATH = "foundation_multitask_model_v2_moe_refactored.pth"
-PREPROCESSOR_SAVE_PATH = "foundation_multitask_preprocessor_v2.npz"
+MODEL_SAVE_PATH = "foundation_multitask_model_v3_moe_vectorized.pth"
+PREPROCESSOR_SAVE_PATH = "foundation_multitask_preprocessor_v3.npz"
 
 # Loss Function Parameters
 HUBER_DELTA = 1.0
@@ -174,7 +173,7 @@ class Expert(nn.Module):
 
 
 class GatingNetwork(nn.Module):
-    def __init__(self, input_dim, num_experts):  # Output is logits for experts
+    def __init__(self, input_dim, num_experts):
         super().__init__()
         self.fc = nn.Linear(input_dim, num_experts)
 
@@ -330,8 +329,8 @@ class MultivariateTimeSeriesDataset(Dataset):
         sensor_mask = np.zeros(self.model_max_sensors_dim, dtype=np.float32)
         num_to_copy = min(self.num_globally_normed_features, self.model_max_sensors_dim)
         padded_input_normed[:, :num_to_copy] = input_slice_normed[:, :num_to_copy]
-        for k in range(num_to_copy):
-            if not np.all(np.isnan(input_slice_normed[:, k])): sensor_mask[k] = 1.0
+        for k_idx in range(num_to_copy):  # Renamed k to k_idx to avoid conflict
+            if not np.all(np.isnan(input_slice_normed[:, k_idx])): sensor_mask[k_idx] = 1.0
         padded_input_normed[np.isnan(padded_input_normed)] = 0.0
         last_known_normed = padded_input_normed[-1, :].copy()
         delta_targets_normed = np.zeros((self.model_max_sensors_dim, len(self.pred_horizons)), dtype=np.float32)
@@ -339,9 +338,9 @@ class MultivariateTimeSeriesDataset(Dataset):
             target_idx = window_start_idx + self.seq_len + h - 1
             if target_idx < features_normalized_aligned.shape[0]:
                 target_values_all_normed = features_normalized_aligned[target_idx, :]
-                for k in range(num_to_copy):
-                    if sensor_mask[k] > 0 and not np.isnan(target_values_all_normed[k]):
-                        delta_targets_normed[k, i_h] = target_values_all_normed[k] - last_known_normed[k]
+                for k_idx in range(num_to_copy):
+                    if sensor_mask[k_idx] > 0 and not np.isnan(target_values_all_normed[k_idx]):
+                        delta_targets_normed[k_idx, i_h] = target_values_all_normed[k_idx] - last_known_normed[k_idx]
         fail_targets = np.zeros(len(self.fail_horizons), dtype=np.float32)
         for i_fh, fh in enumerate(self.fail_horizons):
             start, end = window_start_idx + self.seq_len, window_start_idx + self.seq_len + fh
@@ -351,10 +350,10 @@ class MultivariateTimeSeriesDataset(Dataset):
         if end_r <= len(flags_full) and np.any(flags_full[start_r:end_r]):
             current_window_raw = raw_features_aligned[window_start_idx: window_start_idx + self.seq_len, :]
             future_lookahead_raw = raw_features_aligned[start_r:end_r, :]
-            for k in range(num_to_copy):
-                if sensor_mask[k] > 0:
-                    sensor_data_current_window_raw = current_window_raw[:, k];
-                    sensor_data_future_lookahead_raw = future_lookahead_raw[:, k]
+            for k_idx in range(num_to_copy):
+                if sensor_mask[k_idx] > 0:
+                    sensor_data_current_window_raw = current_window_raw[:, k_idx];
+                    sensor_data_future_lookahead_raw = future_lookahead_raw[:, k_idx]
                     valid_current_raw = sensor_data_current_window_raw[~np.isnan(sensor_data_current_window_raw)];
                     valid_future_raw = sensor_data_future_lookahead_raw[~np.isnan(sensor_data_future_lookahead_raw)]
                     if len(valid_current_raw) > 0 and len(valid_future_raw) > 0:
@@ -362,21 +361,20 @@ class MultivariateTimeSeriesDataset(Dataset):
                         std_current_raw = np.std(valid_current_raw);
                         std_current_raw = max(std_current_raw, 1e-6)
                         if np.any(np.abs(valid_future_raw - mean_current_raw) > 3 * std_current_raw): rca_targets[
-                            k] = 1.0
+                            k_idx] = 1.0
         return {"input_features": torch.from_numpy(padded_input_normed), "sensor_mask": torch.from_numpy(sensor_mask),
                 "last_known_values_globally_std": torch.from_numpy(last_known_normed),
                 "pred_delta_targets_globally_std": torch.from_numpy(delta_targets_normed),
                 "fail_targets": torch.from_numpy(fail_targets), "rca_targets": torch.from_numpy(rca_targets)}
 
 
-# --- Foundational Multi-Task Model (Refactored MoE) ---
+# --- Foundational Multi-Task Model (MoE with Vectorized TopK) ---
 class FoundationalTimeSeriesModel(nn.Module):
     def __init__(self, model_max_sensors, seq_len,
                  sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim,
                  tcn_levels, tcn_kernel_size, tcn_dropout,
                  transformer_d_model, transformer_nhead, transformer_nlayers,
                  num_shared_experts, moe_expert_input_dim, moe_hidden_dim_expert, moe_output_dim,
-                 # Removed expert_dropout_rate from here
                  pred_horizons_len, fail_horizons_len,
                  moe_top_k, moe_noise_std, aux_loss_coeff, entropy_reg_coeff):
         super().__init__()
@@ -384,15 +382,15 @@ class FoundationalTimeSeriesModel(nn.Module):
         self.seq_len = seq_len
         self.num_shared_experts = num_shared_experts
         self.moe_output_dim = moe_output_dim
-        self.transformer_d_model = transformer_d_model  # Store for easy access
+        self.transformer_d_model = transformer_d_model
         self.sensor_tcn_out_dim = sensor_tcn_out_dim
 
         self.moe_top_k = moe_top_k
         self.moe_noise_std = moe_noise_std
-        self.aux_loss_coeff = aux_loss_coeff  # For load balancing
-        self.entropy_reg_coeff = entropy_reg_coeff  # For gate entropy
+        self.aux_loss_coeff = aux_loss_coeff
+        self.entropy_reg_coeff = entropy_reg_coeff
 
-        print("FoundationalTimeSeriesModel: Using MMoE with shared experts and soft top-k routing.")
+        print("FoundationalTimeSeriesModel: Using MMoE with shared experts and VECTORIZED soft top-k routing.")
 
         self.per_sensor_encoder = PerSensorEncoderTCN(sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim,
                                                       seq_len, tcn_levels, tcn_kernel_size, tcn_dropout)
@@ -401,13 +399,10 @@ class FoundationalTimeSeriesModel(nn.Module):
         self.inter_sensor_transformer = InterSensorTransformer(transformer_d_model, transformer_nhead,
                                                                transformer_nlayers, model_max_sensors)
 
-        # MMoE Components: Shared Experts, Task-Specific Gates
         self.experts_shared = nn.ModuleList(
             [Expert(moe_expert_input_dim, moe_hidden_dim_expert, moe_output_dim) for _ in range(num_shared_experts)])
 
-        # Input to forecast/fail gates is mean + std of transformer outputs
         gate_input_dim_global = transformer_d_model * 2
-        # Input to RCA gate is per-token transformer output
         gate_input_dim_rca_token = transformer_d_model
 
         self.gates = nn.ModuleDict({
@@ -416,23 +411,18 @@ class FoundationalTimeSeriesModel(nn.Module):
             "rca": GatingNetwork(gate_input_dim_rca_token, num_shared_experts)
         })
 
-        # Task-specific Heads
-        # Forecast head input: TCN_last_step + Transformer_context + MoE_forecast_output
         self.pred_head = nn.Linear(sensor_tcn_out_dim + transformer_d_model + moe_output_dim, pred_horizons_len)
-        # Fail head input: MoE_fail_output (from global features)
         self.fail_head = nn.Linear(moe_output_dim, fail_horizons_len)
-        # RCA head input: TCN_last_step (per-sensor) + Transformer_context (per-sensor) + MoE_rca_output (per-sensor)
         self.rca_head = nn.Linear(sensor_tcn_out_dim + transformer_d_model + moe_output_dim, 1)
 
-    def _apply_moe_topk(self, x_expert_input, gate_input, gate_network, experts, k, noise_std):
+    def _apply_moe_topk(self, x_expert_input, gate_input, gate_network, experts_modulelist, k, noise_std):
         """
-        Applies soft top-k routing for Mixture of Experts.
+        Applies soft top-k routing for Mixture of Experts (Vectorized version).
         Args:
             x_expert_input: Input tensor for the experts [BatchSize_effective, ExpertInputDim].
-                            For global tasks, BatchSize_effective=B. For token-level, BatchSize_effective=B*S.
             gate_input: Input tensor for the gate network [BatchSize_effective, GateInputDim].
             gate_network: The gating network module.
-            experts: ModuleList of expert networks.
+            experts_modulelist: ModuleList of expert networks.
             k: Number of experts to select.
             noise_std: Standard deviation for noise added to gate logits.
         Returns:
@@ -440,70 +430,51 @@ class FoundationalTimeSeriesModel(nn.Module):
             load_balance_loss: Scalar load balancing loss.
             gate_logits: Logits from the gate [BatchSize_effective, NumExperts], for entropy loss.
         """
-        batch_size_effective = gate_input.size(0)
-        num_experts = len(experts)
-
+        # 1. Gate
         logits = gate_network(gate_input)  # [B_eff, num_experts]
-
-        if self.training and noise_std > 0:
+        if self.training and noise_std > 0:  # noise_std check also ensures it's not None
             logits = logits + torch.randn_like(logits) * noise_std
 
-        topk_val, topk_idx = torch.topk(logits, min(k, num_experts), dim=-1)  # [B_eff, k]
-        topk_w = torch.softmax(topk_val, dim=-1)  # [B_eff, k], softmax over k selected experts
+        # Ensure k is not greater than the number of experts
+        num_experts = len(experts_modulelist)
+        eff_k = min(k, num_experts)
 
-        # Gather expert outputs
-        y = torch.zeros(batch_size_effective, self.moe_output_dim, device=x_expert_input.device,
-                        dtype=x_expert_input.dtype)
+        topk_val, topk_idx = torch.topk(logits, eff_k, dim=-1)  # [B_eff, eff_k]
+        topk_w = torch.softmax(topk_val, dim=-1)  # [B_eff, eff_k]
 
-        # expert_outputs_list = []
-        # for i in range(num_experts):
-        #     expert_outputs_list.append(experts[i](x_expert_input)) # [B_eff, D_out]
-        # all_expert_outputs = torch.stack(expert_outputs_list, dim=1) # [B_eff, num_experts, D_out]
+        # 2. Experts (compute once)
+        #    Stack: [B_eff, NumExperts, ExpertOutputDim]
+        all_out = torch.stack([e(x_expert_input) for e in experts_modulelist], dim=1)
 
-        # flat_topk_idx = topk_idx.view(-1) # [B_eff * k]
-        # # Create a flat batch index for selection
-        # flat_batch_indices = torch.arange(batch_size_effective, device=x_expert_input.device).unsqueeze(1).repeat(1, k).view(-1) # [B_eff * k]
+        # 3. Gather the k chosen experts
+        expert_output_dim = all_out.size(-1)
+        # expand topk_idx to match the dimension of all_out for gather
+        # topk_idx: [B_eff, eff_k] -> gather_idx: [B_eff, eff_k, ExpertOutputDim]
+        gather_idx = topk_idx.unsqueeze(-1).expand(-1, eff_k, expert_output_dim)
 
-        # selected_expert_outputs = all_expert_outputs[flat_batch_indices, flat_topk_idx] # [B_eff * k, D_out]
-        # selected_expert_outputs = selected_expert_outputs.view(batch_size_effective, k, self.moe_output_dim) # [B_eff, k, D_out]
+        # sel_out: [B_eff, eff_k, ExpertOutputDim]
+        sel_out = all_out.gather(1, gather_idx)
 
-        # y = (selected_expert_outputs * topk_w.unsqueeze(-1)).sum(dim=1) # [B_eff, D_out]
+        # Weighted sum of selected expert outputs
+        # topk_w: [B_eff, eff_k] -> topk_w.unsqueeze(-1): [B_eff, eff_k, 1]
+        y = (sel_out * topk_w.unsqueeze(-1)).sum(dim=1)  # [B_eff, ExpertOutputDim]
 
-        # Simpler loop for clarity, can be optimized if it becomes a bottleneck
-        # This gathers expert outputs only for the chosen indices and weights them
-        for slot in range(topk_idx.size(1)):  # Iterate through k
-            idx_this_slot = topk_idx[:, slot]  # [B_eff]
-            weights_this_slot = topk_w[:, slot:slot + 1]  # [B_eff, 1]
+        # 4. Load-balance & (optional) entropy
+        # P_i: mean router probability for expert i
+        router_prob_for_loss = torch.softmax(logits, -1)  # [B_eff, num_experts]
+        avg_router_prob = router_prob_for_loss.mean(0)  # [num_experts] (P_i)
 
-            # Process each item with its chosen expert for this slot
-            # This can be slow if B_eff is very large.
-            # Consider batching expert calls if performance is an issue.
-            expert_outputs_this_slot = []
-            for b_eff in range(batch_size_effective):
-                chosen_expert_idx = idx_this_slot[b_eff].item()
-                expert_out = experts[chosen_expert_idx](x_expert_input[b_eff:b_eff + 1])  # [1, D_out]
-                expert_outputs_this_slot.append(expert_out)
-
-            y += torch.cat(expert_outputs_this_slot, dim=0) * weights_this_slot
-
-        # Load-balancing loss (aux)
-        # router_prob: P_i = mean(softmax(logits)) for expert i
-        # expert_frac: f_i = fraction of examples routed to expert i (among top-k choices)
-        router_prob_for_loss = torch.softmax(logits, dim=-1)  # [B_eff, num_experts]
-
-        # Calculate f_i: fraction of times each expert is chosen in top-k
-        # For each item, it selected k experts. We count how many times each expert appears in top_k_idx.
-        expert_frac = torch.zeros(num_experts, device=logits.device)
-        for i in range(num_experts):
-            expert_frac[i] = (topk_idx == i).sum()
-        expert_frac = expert_frac / (batch_size_effective * k)  # Normalize by total selections
-
-        # Calculate P_i: average router probability for expert i
-        avg_router_prob = router_prob_for_loss.mean(dim=0)  # [num_experts]
+        # f_i: fraction of examples routed to expert i (among top-k choices)
+        # Create a tensor of ones with the same shape and type as topk_idx for scatter_add
+        ones_for_scatter = torch.ones_like(topk_idx, dtype=router_prob_for_loss.dtype).reshape(-1)
+        expert_frac = torch.zeros_like(avg_router_prob).scatter_add_(
+            0, topk_idx.reshape(-1),  # Flatten indices for scattering
+            ones_for_scatter
+        ) / (x_expert_input.size(0) * eff_k)  # Normalize by total selections (f_i)
 
         load_balance_loss = self.num_shared_experts * (avg_router_prob * expert_frac).sum()
 
-        return y, load_balance_loss, logits  # Return logits for entropy calculation
+        return y, load_balance_loss, logits
 
     def forward(self, x_features_globally_std, sensor_mask):
         batch_size, seq_len, _ = x_features_globally_std.shape
@@ -521,103 +492,76 @@ class FoundationalTimeSeriesModel(nn.Module):
                                                                          self.sensor_tcn_out_dim)
         sensor_temporal_features = sensor_temporal_features * sensor_mask.view(batch_size, self.model_max_sensors, 1, 1)
 
-        pooled_sensor_features = torch.mean(sensor_temporal_features, dim=2)  # Avg over SeqLen
+        pooled_sensor_features = torch.mean(sensor_temporal_features, dim=2)
         projected_for_inter_sensor = self.pooled_to_transformer_dim_proj(pooled_sensor_features)
         transformer_padding_mask = (sensor_mask == 0)
-        cross_sensor_context = self.inter_sensor_transformer(projected_for_inter_sensor,
-                                                             transformer_padding_mask)  # [B, S, D_transformer]
+        cross_sensor_context = self.inter_sensor_transformer(projected_for_inter_sensor, transformer_padding_mask)
         cross_sensor_context_masked = cross_sensor_context * sensor_mask.unsqueeze(-1)
 
-        # --- Global MoE Inputs (for Forecast & Fail) ---
         active_sensors_per_batch = sensor_mask.sum(dim=1, keepdim=True).clamp(min=1)
-
-        # Mean context (expert input for global tasks)
-        mean_ctx_global = (cross_sensor_context_masked).sum(dim=1) / active_sensors_per_batch  # [B, D_transformer]
-
-        # Std context (for richer gate input)
-        # Variance = E[X^2] - (E[X])^2
+        mean_ctx_global = (cross_sensor_context_masked).sum(dim=1) / active_sensors_per_batch
         mean_sq_ctx_global = ((cross_sensor_context_masked ** 2) * sensor_mask.unsqueeze(-1)).sum(
             dim=1) / active_sensors_per_batch
         var_ctx_global = mean_sq_ctx_global - mean_ctx_global ** 2
-        std_ctx_global = torch.sqrt(var_ctx_global.clamp(min=1e-6))  # [B, D_transformer]
+        std_ctx_global = torch.sqrt(var_ctx_global.clamp(min=1e-6))
+        router_input_global = torch.cat([mean_ctx_global, std_ctx_global], dim=-1)
 
-        router_input_global = torch.cat([mean_ctx_global, std_ctx_global], dim=-1)  # [B, 2*D_transformer]
-
-        # MoE for Forecast
         moe_forecast_output, aux_f, logits_f = self._apply_moe_topk(
             mean_ctx_global, router_input_global, self.gates["forecast"], self.experts_shared,
             self.moe_top_k, self.moe_noise_std
         )
-
-        # MoE for Fail
         moe_fail_output, aux_fail, logits_fail = self._apply_moe_topk(
             mean_ctx_global, router_input_global, self.gates["fail"], self.experts_shared,
             self.moe_top_k, self.moe_noise_std
         )
 
-        # --- Token-Level MoE Input (for RCA) ---
-        # x_sensor_ctx is cross_sensor_context_masked: [B, S, D_transformer]
-        # Expert input for RCA is each sensor's transformer output
-        # Gate input for RCA is also each sensor's transformer output
-        x_flat_rca_expert_input = cross_sensor_context_masked.reshape(-1,
-                                                                      self.transformer_d_model)  # [B*S, D_transformer]
-        # Create a mask for valid tokens in the flattened input (where sensor_mask was 1)
+        x_flat_rca_expert_input = cross_sensor_context_masked.reshape(-1, self.transformer_d_model)
         valid_token_mask_rca = sensor_mask.view(-1).bool()
         x_flat_rca_expert_input_valid = x_flat_rca_expert_input[valid_token_mask_rca]
-        # Gate input is the same for valid tokens
-        x_flat_rca_gate_input_valid = x_flat_rca_expert_input_valid
 
-        moe_rca_output_flat_valid, aux_rca, logits_rca_valid = torch.tensor(0.0, device=DEVICE), torch.tensor(0.0,
-                                                                                                              device=DEVICE), None
-        if x_flat_rca_expert_input_valid.size(0) > 0:  # Only apply MoE if there are active sensors
+        moe_rca_output_flat_valid = torch.empty(0, self.moe_output_dim, device=DEVICE,
+                                                dtype=moe_forecast_output.dtype)  # Ensure it has a default even if not computed
+        aux_rca = torch.tensor(0.0, device=DEVICE)
+        logits_rca_valid = None  # Ensure it's defined
+
+        if x_flat_rca_expert_input_valid.size(0) > 0:
+            # Gate input is the same as expert input for token-level RCA
+            x_flat_rca_gate_input_valid = x_flat_rca_expert_input_valid
             moe_rca_output_flat_valid, aux_rca, logits_rca_valid = self._apply_moe_topk(
                 x_flat_rca_expert_input_valid, x_flat_rca_gate_input_valid, self.gates["rca"], self.experts_shared,
                 self.moe_top_k, self.moe_noise_std
             )
 
-        # Scatter valid outputs back to full size for head input
         moe_rca_output_flat = torch.zeros(batch_size * self.model_max_sensors, self.moe_output_dim, device=DEVICE,
                                           dtype=moe_forecast_output.dtype)
         if x_flat_rca_expert_input_valid.size(0) > 0:
             moe_rca_output_flat[valid_token_mask_rca] = moe_rca_output_flat_valid
 
-        # Collect auxiliary losses
         total_aux_loss = self.aux_loss_coeff * (aux_f + aux_fail + aux_rca)
 
-        # Collect entropy losses
         total_entropy_loss = torch.tensor(0.0, device=DEVICE)
         if self.entropy_reg_coeff > 0:
-            for gate_logits in [logits_f, logits_fail, logits_rca_valid]:
-                if gate_logits is not None and gate_logits.numel() > 0:  # Check if logits_rca_valid is not None and not empty
-                    probs = F.softmax(gate_logits, dim=-1)
-                    log_probs = F.log_softmax(gate_logits, dim=-1)
+            for gate_logits_set in [logits_f, logits_fail, logits_rca_valid]:
+                if gate_logits_set is not None and gate_logits_set.numel() > 0:
+                    probs = F.softmax(gate_logits_set, dim=-1)
+                    log_probs = F.log_softmax(gate_logits_set, dim=-1)  # Use log_softmax for stability
                     total_entropy_loss -= self.entropy_reg_coeff * (probs * log_probs).sum(dim=-1).mean()
 
-        # --- Prepare features for prediction heads ---
-        tcn_features_last_step = sensor_temporal_features[:, :, -1, :]  # [B, S, SENSOR_TCN_OUT_DIM]
-
-        # Forecasting head
-        moe_f_expanded = moe_forecast_output.unsqueeze(1).expand(-1, self.model_max_sensors, -1)  # [B, S, MOE_OUT]
+        tcn_features_last_step = sensor_temporal_features[:, :, -1, :]
+        moe_f_expanded = moe_forecast_output.unsqueeze(1).expand(-1, self.model_max_sensors, -1)
         pred_head_input_features = torch.cat([tcn_features_last_step, cross_sensor_context_masked, moe_f_expanded],
                                              dim=-1)
         pred_delta_globally_std = self.pred_head(pred_head_input_features)
         pred_abs_globally_std = last_val_globally_std.unsqueeze(-1) + pred_delta_globally_std
         pred_abs_globally_std = pred_abs_globally_std * sensor_mask.unsqueeze(-1)
 
-        # Failure prediction head
-        fail_logits = self.fail_head(moe_fail_output)  # [B, fail_horizons_len]
+        fail_logits = self.fail_head(moe_fail_output)
 
-        # RCA prediction head (per-sensor)
-        # moe_rca_output_flat is [B*S, MOE_OUT]
-        # tcn_features_last_step_flat is [B*S, SENSOR_TCN_OUT_DIM]
-        # cross_sensor_context_masked_flat is [B*S, D_transformer]
         tcn_flat = tcn_features_last_step.reshape(-1, self.sensor_tcn_out_dim)
         ctx_flat = cross_sensor_context_masked.reshape(-1, self.transformer_d_model)
-
         rca_head_input_flat = torch.cat([tcn_flat, ctx_flat, moe_rca_output_flat], dim=-1)
-        rca_logits_flat = self.rca_head(rca_head_input_flat).squeeze(-1)  # [B*S]
-        rca_logits = rca_logits_flat.view(batch_size, self.model_max_sensors)  # [B,S]
-        # Masking for RCA loss will be handled by sensor_mask in the loss calculation
+        rca_logits_flat = self.rca_head(rca_head_input_flat).squeeze(-1)
+        rca_logits = rca_logits_flat.view(batch_size, self.model_max_sensors)
 
         return pred_abs_globally_std, fail_logits, rca_logits, total_aux_loss, total_entropy_loss
 
@@ -676,7 +620,8 @@ def train_and_save_model():
                                                   global_stds, canonical_sensor_names)
     if len(train_dataset) == 0: print("ERROR: Training dataset empty."); return
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=AMP_ENABLED)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0,
+                              pin_memory=AMP_ENABLED)  # Consider num_workers > 0
     valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0,
                               pin_memory=AMP_ENABLED) if len(valid_dataset) > 0 else None
 
@@ -696,7 +641,7 @@ def train_and_save_model():
     focal_loss_elementwise = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='none')
     focal_loss_mean = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='mean')
 
-    print("Starting multi-task training (Forecast, Fail, RCA) with refactored MoE...")
+    print("Starting multi-task training (Forecast, Fail, RCA) with VECTORIZED MoE...")
     for epoch in range(EPOCHS):
         model.train()
         total_loss_epoch, total_lp_epoch, total_lf_epoch, total_lr_epoch, total_laux_epoch, total_lentr_epoch = 0, 0, 0, 0, 0, 0
@@ -725,7 +670,6 @@ def train_and_save_model():
                 lr_masked = lr_elements * sensor_m
                 lr = lr_masked.sum() / sensor_m.sum().clamp(min=1e-9)
 
-                # l_aux and l_entropy are already scaled by their coefficients in the model forward pass
                 combined_loss = W_PRED * lp + W_FAIL * lf + W_RCA * lr + l_aux + l_entropy
 
             if torch.isnan(combined_loss) or torch.isinf(combined_loss):
@@ -761,23 +705,28 @@ def train_and_save_model():
             total_val_loss, total_val_lp, total_val_lf, total_val_lr, total_val_laux, total_val_lentr = 0, 0, 0, 0, 0, 0
             num_val_batches = 0
             with torch.no_grad():
-                for batch in valid_loader:
-                    input_feat = batch["input_features"].to(DEVICE);
-                    sensor_m = batch["sensor_mask"].to(DEVICE)
-                    last_k_std = batch["last_known_values_globally_std"].to(DEVICE);
-                    delta_tgt_std = batch["pred_delta_targets_globally_std"].to(DEVICE)
-                    fail_tgt = batch["fail_targets"].to(DEVICE);
-                    rca_tgt = batch["rca_targets"].to(DEVICE)
+                for batch_val in valid_loader:  # Renamed batch to batch_val
+                    input_feat_val = batch_val["input_features"].to(DEVICE);
+                    sensor_m_val = batch_val["sensor_mask"].to(DEVICE)
+                    last_k_std_val = batch_val["last_known_values_globally_std"].to(DEVICE);
+                    delta_tgt_std_val = batch_val["pred_delta_targets_globally_std"].to(DEVICE)
+                    fail_tgt_val = batch_val["fail_targets"].to(DEVICE);
+                    rca_tgt_val = batch_val["rca_targets"].to(DEVICE)
                     with autocast(enabled=AMP_ENABLED):
-                        pred_abs_std, fail_logits, rca_logits, l_aux_val, l_entr_val = model(input_feat,
-                                                                                             sensor_m)  # model.eval() will turn off noise_std in _apply_moe_topk if training flag is checked
-                        abs_target_std = last_k_std.unsqueeze(-1) + delta_tgt_std
-                        lp_val_el = huber_loss_fn(pred_abs_std, abs_target_std)
-                        lp_val = (lp_val_el * sensor_m.unsqueeze(-1)).sum() / (
-                                    sensor_m.sum() * len(PRED_HORIZONS)).clamp(min=1e-9)
-                        lf_val = focal_loss_mean(fail_logits, fail_tgt)
-                        lr_val_el = focal_loss_elementwise(rca_logits, rca_tgt)
-                        lr_val = (lr_val_el * sensor_m).sum() / sensor_m.sum().clamp(min=1e-9)
+                        # Note: self.training is False in model.eval(), so noise_std in _apply_moe_topk will be effectively off
+                        pred_abs_std_val, fail_logits_val, rca_logits_val, l_aux_val, l_entr_val = model(input_feat_val,
+                                                                                                         sensor_m_val)
+
+                        abs_target_std_val = last_k_std_val.unsqueeze(-1) + delta_tgt_std_val
+                        lp_val_el = huber_loss_fn(pred_abs_std_val, abs_target_std_val)
+                        lp_val = (lp_val_el * sensor_m_val.unsqueeze(-1)).sum() / (
+                                    sensor_m_val.sum() * len(PRED_HORIZONS)).clamp(min=1e-9)
+
+                        lf_val = focal_loss_mean(fail_logits_val, fail_tgt_val)
+
+                        lr_val_el = focal_loss_elementwise(rca_logits_val, rca_tgt_val)
+                        lr_val = (lr_val_el * sensor_m_val).sum() / sensor_m_val.sum().clamp(min=1e-9)
+
                         val_loss = W_PRED * lp_val + W_FAIL * lf_val + W_RCA * lr_val + l_aux_val + l_entr_val
                     if not (torch.isnan(val_loss) or torch.isinf(val_loss)):
                         total_val_loss += val_loss.item();
@@ -804,7 +753,7 @@ def print_avg_losses(epoch, phase, num_batches, total_loss, lp, lf, lr, laux, le
 
 if __name__ == '__main__':
     print(
-        "--- Script Version: Multi-Task Foundational Model with Refactored MoE (Soft Top-k, MMoE, Token RCA, Richer Router, Entropy Reg) ---")
+        "--- Script Version: Multi-Task Foundational Model with Refactored MoE (Vectorized Soft Top-k, MMoE, Token RCA, Richer Router, Entropy Reg) ---")
     print(f"IMPORTANT: TRAIN_DIR ('{TRAIN_DIR}') and VALID_DIR ('{VALID_DIR}') must be set correctly.")
     if BASE_DATA_DIR == "../../data/time_series/1": print(
         "\nWARNING: Using default example BASE_DATA_DIR. Paths might be incorrect.\n")
