@@ -10,9 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
-from sklearn.metrics import roc_auc_score, average_precision_score
-from sklearn.exceptions import UndefinedMetricWarning
-import warnings
+from sklearn.metrics import roc_auc_score, average_precision_score # Added for Suggestion 7
 
 # --- Configuration ---
 # Data paths
@@ -48,16 +46,17 @@ MOE_EXPERT_INPUT_DIM = TRANSFORMER_D_MODEL
 MOE_HIDDEN_DIM_EXPERT = 128
 MOE_OUTPUT_DIM = 64
 
-# MoE Parameters
+# New MoE Parameters
 MOE_TOP_K = 2
-MOE_NOISE_STD = 0.3  # Suggestion #6: Reduce MOE_NOISE_STD to 0.3
+# MOE_NOISE_STD = 1.0 # Original
+MOE_NOISE_STD = 0.3    # Suggestion 6: Reduce MOE_NOISE_STD
 AUX_LOSS_COEFF = 0.01
-ENTROPY_REG_COEFF = 0.01  # For forecast gate
-ENTROPY_REG_COEFF_FAIL_RCA = 0.001  # Suggestion #6: For fail/RCA gates
+# ENTROPY_REG_COEFF = 0.01 # Original
+ENTROPY_REG_COEFF = 0.001 # Suggestion 6: Try dropping ENTROPY_REG_COEFF
 
 # Training Parameters
 BATCH_SIZE = 32
-EPOCHS = 40
+EPOCHS = 40 # Original value, may need adjustment for annealing
 LEARNING_RATE = 3e-4
 ADAM_BETAS = (0.9, 0.98)
 ADAM_WEIGHT_DECAY = 1e-2
@@ -67,20 +66,20 @@ WARMUP_RATIO = 0.05
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 AMP_ENABLED = DEVICE.type == 'cuda'
 
-MODEL_SAVE_PATH = "foundation_multitask_model_v3_moe_vectorized_updated.pth"
-PREPROCESSOR_SAVE_PATH = "foundation_multitask_preprocessor_v3_updated.npz"
+MODEL_SAVE_PATH = "foundation_multitask_model_v4_suggestions.pth" # Updated path
+PREPROCESSOR_SAVE_PATH = "foundation_multitask_preprocessor_v4.npz" # Updated path
 
 # Loss Function Parameters
 HUBER_DELTA = 1.0
 FOCAL_ALPHA_PARAM = 0.25
 FOCAL_GAMMA = 2.0
 
-# Loss weights (Suggestion #2)
-W_PRED = 1.0  # keep forecasting importance
-W_FAIL_INITIAL = 2.5  # make the model *care* ( चुना 2.5 from 2.0-3.0 range)
-W_RCA_INITIAL = 1.0  # balance RCA with forecasting
-ANNEAL_LOSS_WEIGHTS_START_EPOCH = 10
-LOSS_WEIGHT_ANNEAL_FACTOR = 0.9
+# Loss weights (Suggestion 2)
+W_PRED = 1.0
+W_FAIL_BASE = 2.5  # Changed from 1.0, chosen from 2.0-3.0
+W_RCA_BASE  = 1.0  # Changed from 0.5
+ANNEAL_LOSS_WEIGHTS_START_EPOCH = 10 # Anneal after 10 epochs (i.e., starting from epoch 10 if 0-indexed)
+ANNEAL_LOSS_WEIGHTS_FACTOR = 0.9
 
 
 # --- Helper: Positional Encoding ---
@@ -125,14 +124,14 @@ class TemporalBlock(nn.Module):
         return self.relu_out(out + res)
 
 
-# --- Per-Sensor TCN Encoder (Suggestion #3 modification) ---
+# --- Per-Sensor TCN Encoder (Modified for Suggestion 3: CLS Token) ---
 class PerSensorEncoderTCN(nn.Module):
     def __init__(self, input_dim, proj_dim, tcn_out_dim, seq_len, num_levels, kernel_size, dropout):
         super(PerSensorEncoderTCN, self).__init__()
         self.input_proj = nn.Linear(input_dim, proj_dim)
-        # Suggestion #3: Add a learnable CLS token
+        # Suggestion 3: Add a learnable CLS token
         self.cls_token = nn.Parameter(torch.randn(1, 1, proj_dim))
-        # Adjust max_len for CLS token
+        # Positional encoding max_len needs to accommodate seq_len + 1 (for CLS token)
         self.pos_encoder = PositionalEncoding(proj_dim, max_len=max(seq_len + 1, 5000))
 
         tcn_blocks = []
@@ -147,26 +146,31 @@ class PerSensorEncoderTCN(nn.Module):
             current_channels = out_channels_block
         self.tcn_network = nn.Sequential(*tcn_blocks)
         self.final_norm = nn.LayerNorm(tcn_out_dim)
+        self.tcn_out_dim = tcn_out_dim # Store for convenience
 
     def forward(self, x):  # x: [Batch*MaxSensors, SeqLen, InputDim]
-        x_proj = self.input_proj(x)  # [B*S, SeqLen, ProjDim]
+        x_proj = self.input_proj(x) # [B*MS, SeqLen, ProjDim]
 
-        # Suggestion #3: Prepend CLS token
-        cls_tokens = self.cls_token.expand(x_proj.size(0), -1, -1)  # [B*S, 1, ProjDim]
-        x_with_cls = torch.cat((cls_tokens, x_proj), dim=1)  # [B*S, SeqLen+1, ProjDim]
+        # Suggestion 3: Prepend CLS token
+        cls_tokens_expanded = self.cls_token.expand(x_proj.size(0), -1, -1) # [B*MS, 1, ProjDim]
+        x_with_cls = torch.cat((cls_tokens_expanded, x_proj), dim=1) # [B*MS, SeqLen+1, ProjDim]
 
-        x_with_cls = self.pos_encoder(x_with_cls)
-        x_with_cls = x_with_cls.permute(0, 2, 1)  # [B*S, ProjDim, SeqLen+1]
+        x_pos_encoded = self.pos_encoder(x_with_cls) # [B*MS, SeqLen+1, ProjDim]
+        x_permuted_for_tcn = x_pos_encoded.permute(0, 2, 1) # [B*MS, ProjDim, SeqLen+1]
 
-        x_tcn_out_with_cls = self.tcn_network(x_with_cls)  # [B*S, TcnOutDim, SeqLen+1]
-        x_permuted_back_with_cls = x_tcn_out_with_cls.permute(0, 2, 1)  # [B*S, SeqLen+1, TcnOutDim]
+        x_tcn_out_with_cls = self.tcn_network(x_permuted_for_tcn) # [B*MS, TcnOutDim, SeqLen+1]
+        x_tcn_out_permuted_back = x_tcn_out_with_cls.permute(0, 2, 1) # [B*MS, SeqLen+1, TcnOutDim]
 
-        normed_output_with_cls = self.final_norm(x_permuted_back_with_cls)
+        # Suggestion 3: Extract CLS token output and main sequence output
+        h_cls = x_tcn_out_permuted_back[:, 0] # [B*MS, TcnOutDim]
+        main_sequence_features = x_tcn_out_permuted_back[:, 1:] # [B*MS, SeqLen, TcnOutDim]
 
-        h_cls_features = normed_output_with_cls[:, 0, :]  # [B*S, TcnOutDim]
-        main_features = normed_output_with_cls[:, 1:, :]  # [B*S, SeqLen, TcnOutDim]
+        main_sequence_normed = self.final_norm(main_sequence_features)
+        # Also norm h_cls for consistency if it's directly used or averaged later
+        h_cls_normed = self.final_norm(h_cls.unsqueeze(1)).squeeze(1)
 
-        return main_features, h_cls_features
+
+        return main_sequence_normed, h_cls_normed
 
 
 # --- Inter-Sensor Transformer ---
@@ -276,8 +280,7 @@ def calculate_global_stats(file_paths, target_num_sensors):
                     if len(valid_data) > 0: sums[i] += valid_data.sum(); sum_sqs[i] += (valid_data ** 2).sum(); counts[
                         i] += len(valid_data)
         except Exception as e:
-            print(f"Warning: Skipping file {fp} during stats calc: {e}");
-            continue
+            print(f"Warning: Skipping file {fp} during stats calc: {e}"); continue
         if (fp_idx + 1) % 20 == 0: print(f"  Processed {fp_idx + 1}/{len(file_paths)} files for stats...")
     if canonical_sensor_names is None or target_num_sensors == 0 or np.sum(counts) == 0: print(
         "Error: Failed to calculate global stats."); return None, None, []
@@ -317,8 +320,7 @@ class MultivariateTimeSeriesDataset(Dataset):
             try:
                 df = pd.read_csv(fp)
             except Exception as e:
-                print(f"Warning: Skipping file {fp}: {e}");
-                continue
+                print(f"Warning: Skipping file {fp}: {e}"); continue
             raw_features_from_canonical_cols = np.full((len(df), self.num_globally_normed_features), np.nan,
                                                        dtype=np.float32)
             for i, name in enumerate(self.canonical_sensor_names):
@@ -356,8 +358,7 @@ class MultivariateTimeSeriesDataset(Dataset):
         for k_idx in range(num_to_copy):
             if not np.all(np.isnan(input_slice_normed[:, k_idx])): sensor_mask[k_idx] = 1.0
         padded_input_normed[np.isnan(padded_input_normed)] = 0.0
-        last_known_normed = padded_input_normed[-1, :].copy()  # This is last_val for novelty
-
+        last_known_normed = padded_input_normed[-1, :].copy() # This is last_val for RCA novelty
         delta_targets_normed = np.zeros((self.model_max_sensors_dim, len(self.pred_horizons)), dtype=np.float32)
         for i_h, h in enumerate(self.pred_horizons):
             target_idx = window_start_idx + self.seq_len + h - 1
@@ -366,12 +367,10 @@ class MultivariateTimeSeriesDataset(Dataset):
                 for k_idx in range(num_to_copy):
                     if sensor_mask[k_idx] > 0 and not np.isnan(target_values_all_normed[k_idx]):
                         delta_targets_normed[k_idx, i_h] = target_values_all_normed[k_idx] - last_known_normed[k_idx]
-
         fail_targets = np.zeros(len(self.fail_horizons), dtype=np.float32)
         for i_fh, fh in enumerate(self.fail_horizons):
             start, end = window_start_idx + self.seq_len, window_start_idx + self.seq_len + fh
             if end <= len(flags_full) and np.any(flags_full[start:end]): fail_targets[i_fh] = 1.0
-
         rca_targets = np.zeros(self.model_max_sensors_dim, dtype=np.float32)
         start_r, end_r = window_start_idx + self.seq_len, window_start_idx + self.seq_len + self.rca_failure_lookahead
         if end_r <= len(flags_full) and np.any(flags_full[start_r:end_r]):
@@ -389,15 +388,13 @@ class MultivariateTimeSeriesDataset(Dataset):
                         std_current_raw = max(std_current_raw, 1e-6)
                         if np.any(np.abs(valid_future_raw - mean_current_raw) > 3 * std_current_raw): rca_targets[
                             k_idx] = 1.0
-        return {"input_features": torch.from_numpy(padded_input_normed),
-                "sensor_mask": torch.from_numpy(sensor_mask),
-                "last_known_values_globally_std": torch.from_numpy(last_known_normed),  # For novelty
+        return {"input_features": torch.from_numpy(padded_input_normed), "sensor_mask": torch.from_numpy(sensor_mask),
+                "last_known_values_globally_std": torch.from_numpy(last_known_normed),
                 "pred_delta_targets_globally_std": torch.from_numpy(delta_targets_normed),
-                "fail_targets": torch.from_numpy(fail_targets),
-                "rca_targets": torch.from_numpy(rca_targets)}
+                "fail_targets": torch.from_numpy(fail_targets), "rca_targets": torch.from_numpy(rca_targets)}
 
 
-# --- Foundational Multi-Task Model ---
+# --- Foundational Multi-Task Model (MoE with Vectorized TopK) ---
 class FoundationalTimeSeriesModel(nn.Module):
     def __init__(self, model_max_sensors, seq_len,
                  sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim,
@@ -405,24 +402,22 @@ class FoundationalTimeSeriesModel(nn.Module):
                  transformer_d_model, transformer_nhead, transformer_nlayers,
                  num_shared_experts, moe_expert_input_dim, moe_hidden_dim_expert, moe_output_dim,
                  pred_horizons_len, fail_horizons_len,
-                 moe_top_k, moe_noise_std, aux_loss_coeff,
-                 entropy_reg_coeff, entropy_reg_coeff_fail_rca):  # Suggestion #6
+                 moe_top_k, moe_noise_std, aux_loss_coeff, entropy_reg_coeff):
         super().__init__()
         self.model_max_sensors = model_max_sensors
-        self.seq_len = seq_len
+        self.seq_len = seq_len # Original data sequence length
         self.num_shared_experts = num_shared_experts
         self.moe_output_dim = moe_output_dim
         self.transformer_d_model = transformer_d_model
-        self.sensor_tcn_out_dim = sensor_tcn_out_dim  # Needed for CLS feature dim
+        self.sensor_tcn_out_dim = sensor_tcn_out_dim
 
         self.moe_top_k = moe_top_k
         self.moe_noise_std = moe_noise_std
         self.aux_loss_coeff = aux_loss_coeff
-        self.entropy_reg_coeff = entropy_reg_coeff  # For forecast gate
-        self.entropy_reg_coeff_fail_rca = entropy_reg_coeff_fail_rca  # For fail/RCA gates
+        self.entropy_reg_coeff = entropy_reg_coeff
 
-        print(
-            "FoundationalTimeSeriesModel: Using MMoE with shared experts, VECTORIZED soft top-k routing, CLS token, and RCA novelty.")
+        print("FoundationalTimeSeriesModel: Using MMoE with shared experts and VECTORIZED soft top-k routing.")
+        print(f"MoE Noise STD: {self.moe_noise_std}, Entropy Reg Coeff: {self.entropy_reg_coeff}")
 
         self.per_sensor_encoder = PerSensorEncoderTCN(sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim,
                                                       seq_len, tcn_levels, tcn_kernel_size, tcn_dropout)
@@ -434,22 +429,25 @@ class FoundationalTimeSeriesModel(nn.Module):
         self.experts_shared = nn.ModuleList(
             [Expert(moe_expert_input_dim, moe_hidden_dim_expert, moe_output_dim) for _ in range(num_shared_experts)])
 
-        # Gate input dimensions
-        gate_input_dim_forecast_token = transformer_d_model * 2  # [mean_ctx_global ; std_ctx_global]
-        # Suggestion #3: Add CLS token features to fail gate input
-        gate_input_dim_fail_token = transformer_d_model * 2 + sensor_tcn_out_dim
-        gate_input_dim_rca_token = transformer_d_model  # Per-token features from transformer
+        # Suggestion 3: Update gate_input_dim_global for CLS token feature
+        # Original: transformer_d_model * 2
+        # New: transformer_d_model * 2 (mean/std global context) + sensor_tcn_out_dim (global CLS context)
+        gate_input_dim_global_forecast_fail = transformer_d_model * 2 + sensor_tcn_out_dim
+        gate_input_dim_rca_token = transformer_d_model # Unchanged by CLS for RCA gate
 
         self.gates = nn.ModuleDict({
-            "forecast": GatingNetwork(gate_input_dim_forecast_token, num_shared_experts),
-            "fail": GatingNetwork(gate_input_dim_fail_token, num_shared_experts),
+            "forecast": GatingNetwork(gate_input_dim_global_forecast_fail, num_shared_experts),
+            "fail": GatingNetwork(gate_input_dim_global_forecast_fail, num_shared_experts), # Uses CLS enhanced global input
             "rca": GatingNetwork(gate_input_dim_rca_token, num_shared_experts)
         })
 
         self.pred_head = nn.Linear(sensor_tcn_out_dim + transformer_d_model + moe_output_dim, pred_horizons_len)
-        self.fail_head = nn.Linear(moe_output_dim, fail_horizons_len)
-        # Suggestion #5: Add novelty (1 dim) to RCA head input
-        self.rca_head = nn.Linear(sensor_tcn_out_dim + transformer_d_model + moe_output_dim + 1, 1)
+        self.fail_head = nn.Linear(moe_output_dim, fail_horizons_len) # Input from MoE dedicated to fail
+
+        # Suggestion 5: RCA head input dim increases by 1 (for delta novelty score)
+        rca_head_input_dim = sensor_tcn_out_dim + transformer_d_model + moe_output_dim + 1
+        self.rca_head = nn.Linear(rca_head_input_dim, 1)
+
 
     def _apply_moe_topk(self, x_expert_input, gate_input, gate_network, experts_modulelist, k, noise_std):
         logits = gate_network(gate_input)
@@ -471,145 +469,137 @@ class FoundationalTimeSeriesModel(nn.Module):
 
         router_prob_for_loss = torch.softmax(logits, -1)
         avg_router_prob = router_prob_for_loss.mean(0)
-
         ones_for_scatter = torch.ones_like(topk_idx, dtype=router_prob_for_loss.dtype).reshape(-1)
         expert_frac = torch.zeros_like(avg_router_prob).scatter_add_(
             0, topk_idx.reshape(-1), ones_for_scatter
-        ) / (x_expert_input.size(0) * eff_k)
+        ) / (x_expert_input.size(0) * eff_k if x_expert_input.size(0) > 0 else 1.0) # Avoid div by zero
 
         load_balance_loss = self.num_shared_experts * (avg_router_prob * expert_frac).sum()
         return y, load_balance_loss, logits
 
-    def forward(self, x_features_globally_std, sensor_mask,
-                last_val_globally_std_for_novelty):  # Added last_val for novelty
-        batch_size, seq_len, _ = x_features_globally_std.shape
+    def forward(self, x_features_globally_std, sensor_mask, last_known_values_globally_std_for_novelty):
+        batch_size, seq_len_data, _ = x_features_globally_std.shape # seq_len_data is the original SEQ_LEN
 
-        # x_input_masked_for_tcn = x_features_globally_std.permute(0, 2, 1) # B, MaxSensors, SeqLen
-        # x_input_masked_for_tcn = x_input_masked_for_tcn * sensor_mask.unsqueeze(-1) # Apply mask if needed, but TCN input is per sensor
+        # Permute for TCN: [B, MaxSensors, SeqLen] -> [B, MaxSensors, FeatDim=1, SeqLen] if needed, or just handle dimensions.
+        # Input to per_sensor_encoder should be [B*MaxSensors, SeqLen, InputDim=1]
+        x_input_for_tcn = x_features_globally_std.reshape(batch_size * self.model_max_sensors, seq_len_data, SENSOR_INPUT_DIM)
 
-        # The TCN expects input per sensor. If padding is 0, it's fine.
-        # If some sensors are completely padded, their CLS token output might be less meaningful,
-        # but masking later should handle it.
-        x_permuted_for_tcn_input = x_features_globally_std.permute(0, 2, 1)  # B, MaxSensors, SeqLen
-        x_reshaped_for_encoder = x_permuted_for_tcn_input.reshape(batch_size * self.model_max_sensors, seq_len,
-                                                                  SENSOR_INPUT_DIM)
+        # Suggestion 3: per_sensor_encoder now returns (main_sequence_features, h_cls_output)
+        # main_sequence_features_flat: [B*MS, SeqLen, TcnOutDim]
+        # h_cls_flat: [B*MS, TcnOutDim]
+        sensor_temporal_features_flat, h_cls_flat = self.per_sensor_encoder(x_input_for_tcn)
 
-        # Suggestion #3: PerSensorEncoderTCN now returns main features and CLS features
-        sensor_main_features_flat, h_cls_per_sensor_flat = self.per_sensor_encoder(x_reshaped_for_encoder)
-        # sensor_main_features_flat: [B*S, SeqLen, TcnOutDim]
-        # h_cls_per_sensor_flat: [B*S, TcnOutDim]
+        # Reshape main sequence features
+        sensor_temporal_features_main = sensor_temporal_features_flat.reshape(
+            batch_size, self.model_max_sensors, seq_len_data, self.sensor_tcn_out_dim
+        )
+        sensor_temporal_features_main = sensor_temporal_features_main * sensor_mask.view(batch_size, self.model_max_sensors, 1, 1)
 
-        sensor_temporal_features = sensor_main_features_flat.reshape(batch_size, self.model_max_sensors, seq_len,
-                                                                     self.sensor_tcn_out_dim)
-        sensor_temporal_features = sensor_temporal_features * sensor_mask.view(batch_size, self.model_max_sensors, 1, 1)
-
-        pooled_sensor_features = torch.mean(sensor_temporal_features, dim=2)  # [B, S, TcnOutDim]
-        projected_for_inter_sensor = self.pooled_to_transformer_dim_proj(
-            pooled_sensor_features)  # [B, S, TransformerDModel]
+        # Pool main sequence features for Transformer input
+        pooled_sensor_features = torch.mean(sensor_temporal_features_main, dim=2) # [B, MS, TcnOutDim]
+        projected_for_inter_sensor = self.pooled_to_transformer_dim_proj(pooled_sensor_features) # [B, MS, TransformerDModel]
 
         transformer_padding_mask = (sensor_mask == 0)
-        cross_sensor_context = self.inter_sensor_transformer(projected_for_inter_sensor,
-                                                             transformer_padding_mask)  # [B, S, TransformerDModel]
+        cross_sensor_context = self.inter_sensor_transformer(projected_for_inter_sensor, transformer_padding_mask) # [B, MS, TransformerDModel]
         cross_sensor_context_masked = cross_sensor_context * sensor_mask.unsqueeze(-1)
 
+        # --- Global Context Calculation ---
         active_sensors_per_batch = sensor_mask.sum(dim=1, keepdim=True).clamp(min=1)
-
-        # Global context for forecast and fail gates
-        mean_ctx_global = (cross_sensor_context_masked).sum(dim=1) / active_sensors_per_batch  # [B, TransformerDModel]
-        mean_sq_ctx_global = ((cross_sensor_context_masked ** 2) * sensor_mask.unsqueeze(-1)).sum(
-            dim=1) / active_sensors_per_batch
+        mean_ctx_global = (cross_sensor_context_masked).sum(dim=1) / active_sensors_per_batch # [B, TransformerDModel]
+        mean_sq_ctx_global = ((cross_sensor_context_masked ** 2) * sensor_mask.unsqueeze(-1)).sum(dim=1) / active_sensors_per_batch
         var_ctx_global = mean_sq_ctx_global - mean_ctx_global ** 2
-        std_ctx_global = torch.sqrt(var_ctx_global.clamp(min=1e-6))
-        router_input_global_forecast = torch.cat([mean_ctx_global, std_ctx_global], dim=-1)  # [B, 2*TransformerDModel]
+        std_ctx_global = torch.sqrt(var_ctx_global.clamp(min=1e-6)) # [B, TransformerDModel]
 
-        # Suggestion #3: Prepare CLS global representation for fail gate
-        h_cls_per_sensor = h_cls_per_sensor_flat.reshape(batch_size, self.model_max_sensors, self.sensor_tcn_out_dim)
+        # Suggestion 3: Incorporate CLS token output into global router input
+        h_cls_per_sensor = h_cls_flat.reshape(batch_size, self.model_max_sensors, self.sensor_tcn_out_dim)
         h_cls_per_sensor_masked = h_cls_per_sensor * sensor_mask.unsqueeze(-1)
-        h_cls_global_representation = h_cls_per_sensor_masked.sum(
-            dim=1) / active_sensors_per_batch  # [B, SensorTcnOutDim]
-        router_input_global_fail = torch.cat([router_input_global_forecast, h_cls_global_representation],
-                                             dim=-1)  # [B, 2*TransformerDModel + SensorTcnOutDim]
+        h_cls_global_avg = h_cls_per_sensor_masked.sum(dim=1) / active_sensors_per_batch # [B, SensorTcnOutDim]
 
-        # MoE for forecast (global router)
+        router_input_global_forecast_fail = torch.cat([mean_ctx_global, std_ctx_global, h_cls_global_avg], dim=-1)
+        # Shape: [B, TransformerDModel*2 + SensorTcnOutDim]
+
+        # --- MoE Routing ---
+        # Forecast and Fail gates use the CLS-enhanced global context
         moe_forecast_output, aux_f, logits_f = self._apply_moe_topk(
-            mean_ctx_global, router_input_global_forecast, self.gates["forecast"], self.experts_shared,
+            mean_ctx_global, router_input_global_forecast_fail, self.gates["forecast"], self.experts_shared,
             self.moe_top_k, self.moe_noise_std
         )
-        # MoE for fail (global router with CLS context)
         moe_fail_output, aux_fail, logits_fail = self._apply_moe_topk(
-            mean_ctx_global, router_input_global_fail, self.gates["fail"], self.experts_shared,
-            # Use fail-specific router input
+            mean_ctx_global, router_input_global_forecast_fail, self.gates["fail"], self.experts_shared, # Using CLS enhanced input
             self.moe_top_k, self.moe_noise_std
         )
 
-        # MoE for RCA (token-level router)
+        # RCA gate uses token-level context (cross_sensor_context_masked)
         x_flat_rca_expert_input = cross_sensor_context_masked.reshape(-1, self.transformer_d_model)
         valid_token_mask_rca = sensor_mask.view(-1).bool()
         x_flat_rca_expert_input_valid = x_flat_rca_expert_input[valid_token_mask_rca]
 
-        moe_rca_output_flat_valid = torch.empty(0, self.moe_output_dim, device=DEVICE, dtype=moe_forecast_output.dtype)
-        aux_rca = torch.tensor(0.0, device=DEVICE)
+        moe_rca_output_flat_valid = torch.empty(0, self.moe_output_dim, device=x_features_globally_std.device, dtype=moe_forecast_output.dtype)
+        aux_rca = torch.tensor(0.0, device=x_features_globally_std.device)
         logits_rca_valid = None
 
         if x_flat_rca_expert_input_valid.size(0) > 0:
-            x_flat_rca_gate_input_valid = x_flat_rca_expert_input_valid  # For RCA, gate input is the token embedding itself
+            # Gate input is the same as expert input for token-level RCA
+            x_flat_rca_gate_input_valid = x_flat_rca_expert_input_valid
             moe_rca_output_flat_valid, aux_rca, logits_rca_valid = self._apply_moe_topk(
                 x_flat_rca_expert_input_valid, x_flat_rca_gate_input_valid, self.gates["rca"], self.experts_shared,
                 self.moe_top_k, self.moe_noise_std
             )
 
-        moe_rca_output_flat = torch.zeros(batch_size * self.model_max_sensors, self.moe_output_dim, device=DEVICE,
-                                          dtype=moe_forecast_output.dtype)
+        moe_rca_output_flat = torch.zeros(batch_size * self.model_max_sensors, self.moe_output_dim, device=x_features_globally_std.device, dtype=moe_forecast_output.dtype)
         if x_flat_rca_expert_input_valid.size(0) > 0:
             moe_rca_output_flat[valid_token_mask_rca] = moe_rca_output_flat_valid
 
         total_aux_loss = self.aux_loss_coeff * (aux_f + aux_fail + aux_rca)
 
-        # Suggestion #6: Different entropy coeffs for gates
-        total_entropy_loss = torch.tensor(0.0, device=DEVICE)
-        if self.entropy_reg_coeff > 0 and logits_f is not None and logits_f.numel() > 0:
-            probs = F.softmax(logits_f, dim=-1);
-            log_probs = F.log_softmax(logits_f, dim=-1)
-            total_entropy_loss -= self.entropy_reg_coeff * (probs * log_probs).sum(dim=-1).mean()
+        total_entropy_loss = torch.tensor(0.0, device=x_features_globally_std.device)
+        if self.entropy_reg_coeff > 0: # Apply to all gates that produced logits
+            for gate_logits_set in [logits_f, logits_fail, logits_rca_valid]:
+                if gate_logits_set is not None and gate_logits_set.numel() > 0:
+                    probs = F.softmax(gate_logits_set, dim=-1)
+                    log_probs = F.log_softmax(gate_logits_set, dim=-1)
+                    # Suggestion 6: ENTROPY_REG_COEFF might be lower (e.g. 0.001)
+                    total_entropy_loss -= self.entropy_reg_coeff * (probs * log_probs).sum(dim=-1).mean()
 
-        if self.entropy_reg_coeff_fail_rca > 0:
-            if logits_fail is not None and logits_fail.numel() > 0:
-                probs = F.softmax(logits_fail, dim=-1);
-                log_probs = F.log_softmax(logits_fail, dim=-1)
-                total_entropy_loss -= self.entropy_reg_coeff_fail_rca * (probs * log_probs).sum(dim=-1).mean()
-            if logits_rca_valid is not None and logits_rca_valid.numel() > 0:
-                probs = F.softmax(logits_rca_valid, dim=-1);
-                log_probs = F.log_softmax(logits_rca_valid, dim=-1)
-                total_entropy_loss -= self.entropy_reg_coeff_fail_rca * (probs * log_probs).sum(dim=-1).mean()
+        # --- Prediction Head ---
+        # Use last step of main sequence features from TCN
+        tcn_features_last_step = sensor_temporal_features_main[:, :, -1, :] # [B, MS, TcnOutDim]
+        moe_f_expanded = moe_forecast_output.unsqueeze(1).expand(-1, self.model_max_sensors, -1) # [B, MS, MoeOutDim]
+        pred_head_input_features = torch.cat([tcn_features_last_step, cross_sensor_context_masked, moe_f_expanded], dim=-1)
+        pred_delta_globally_std = self.pred_head(pred_head_input_features) # [B, MS, NumPredHorizons]
 
-        # Prediction Head
-        tcn_features_last_step = sensor_temporal_features[:, :, -1, :]  # [B, S, TcnOutDim] (using main_features)
-        moe_f_expanded = moe_forecast_output.unsqueeze(1).expand(-1, self.model_max_sensors, -1)  # [B, S, MoeOutDim]
-        pred_head_input_features = torch.cat([tcn_features_last_step, cross_sensor_context_masked, moe_f_expanded],
-                                             dim=-1)
-        pred_delta_globally_std = self.pred_head(pred_head_input_features)  # [B, S, NumPredHorizons]
-
-        # Using last_val_globally_std_for_novelty which comes from data loader (original values at t-1)
-        pred_abs_globally_std = last_val_globally_std_for_novelty.unsqueeze(-1) + pred_delta_globally_std
+        # Calculate absolute predictions
+        # last_val_globally_std (from input x_features...) is [B, MS] (value at t=seq_len-1 for each sensor)
+        last_val_observed_for_pred = x_features_globally_std[:, -1, :] # [B, MS] assuming SENSOR_INPUT_DIM=1 and we take that one feature
+        pred_abs_globally_std = last_val_observed_for_pred.unsqueeze(-1) + pred_delta_globally_std
         pred_abs_globally_std = pred_abs_globally_std * sensor_mask.unsqueeze(-1)
 
-        # Failure Head
-        fail_logits = self.fail_head(moe_fail_output)  # [B, NumFailHorizons]
+        # --- Failure Head ---
+        fail_logits = self.fail_head(moe_fail_output) # [B, NumFailHorizons]
 
-        # RCA Head (Suggestion #5: Novelty input)
-        # delta = torch.abs(pred_next[:, :, 0] - last_val)
-        pred_next_h1 = pred_abs_globally_std[:, :, 0]  # [B, S], prediction for H=1
-        delta_novelty = torch.abs(pred_next_h1 - last_val_globally_std_for_novelty)  # [B, S]
-        delta_novelty_flat = delta_novelty.reshape(-1, 1)  # [B*S, 1]
+        # --- RCA Head (Suggestion 5: Novelty based) ---
+        # Calculate novelty score (delta)
+        with torch.no_grad():
+            # pred_abs_globally_std is [B, MS, NumPredHorizons]
+            # We need prediction for the first horizon (H=1)
+            pred_next_h1 = pred_abs_globally_std[:, :, 0] # [B, MS]
 
-        tcn_flat = tcn_features_last_step.reshape(-1, self.sensor_tcn_out_dim)  # [B*S, TcnOutDim]
-        ctx_flat = cross_sensor_context_masked.reshape(-1, self.transformer_d_model)  # [B*S, TransformerDModel]
-        # moe_rca_output_flat is already [B*S, MoeOutDim]
+        # last_known_values_globally_std_for_novelty is the actual last value from input, passed from training loop
+        # It should be [B, MS]
+        delta_novelty = torch.abs(pred_next_h1 - last_known_values_globally_std_for_novelty) # [B, MS]
+        delta_novelty_masked = delta_novelty * sensor_mask # [B, MS]
+        delta_novelty_flat = delta_novelty_masked.reshape(-1, 1) # [B*MS, 1]
+
+        # Prepare RCA head input
+        tcn_flat = tcn_features_last_step.reshape(-1, self.sensor_tcn_out_dim) # [B*MS, TcnOutDim]
+        ctx_flat = cross_sensor_context_masked.reshape(-1, self.transformer_d_model) # [B*MS, TransformerDModel]
+        # moe_rca_output_flat is [B*MS, MoeOutDim]
 
         rca_head_input_flat = torch.cat([tcn_flat, ctx_flat, moe_rca_output_flat, delta_novelty_flat], dim=-1)
-        rca_logits_flat = self.rca_head(rca_head_input_flat).squeeze(-1)  # [B*S]
-        rca_logits = rca_logits_flat.view(batch_size, self.model_max_sensors)  # [B, S]
-        rca_logits = rca_logits * sensor_mask  # Mask out predictions for non-active sensors
+        # Shape: [B*MS, TcnOutDim + TransformerDModel + MoeOutDim + 1]
+
+        rca_logits_flat = self.rca_head(rca_head_input_flat).squeeze(-1) # [B*MS]
+        rca_logits = rca_logits_flat.view(batch_size, self.model_max_sensors) # [B, MS]
 
         return pred_abs_globally_std, fail_logits, rca_logits, total_aux_loss, total_entropy_loss
 
@@ -623,9 +613,6 @@ def train_and_save_model():
         f"ERROR: TRAIN_DIR '{TRAIN_DIR}' missing."); return
     if not (os.path.exists(VALID_DIR) and os.path.isdir(VALID_DIR)): print(
         f"ERROR: VALID_DIR '{VALID_DIR}' missing."); return
-
-    # Suppress UndefinedMetricWarning for AUROC/PR-AUC when only one class is present in a batch/epoch for a horizon
-    warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
 
     train_file_paths = glob.glob(os.path.join(TRAIN_DIR, "*.csv"))
     if not train_file_paths: print("ERROR: No CSV files in TRAIN_DIR."); return
@@ -650,19 +637,17 @@ def train_and_save_model():
     print(f"Preprocessor config saved to {PREPROCESSOR_SAVE_PATH}")
 
     model = FoundationalTimeSeriesModel(
-        model_max_sensors=model_max_sensors_dim, seq_len=SEQ_LEN,
+        model_max_sensors=model_max_sensors_dim, seq_len=SEQ_LEN, # Pass original SEQ_LEN
         sensor_input_dim=SENSOR_INPUT_DIM, sensor_tcn_proj_dim=SENSOR_TCN_PROJ_DIM,
-        sensor_tcn_out_dim=SENSOR_TCN_OUT_DIM,  # Passed to model for CLS feature dim
+        sensor_tcn_out_dim=SENSOR_TCN_OUT_DIM,
         tcn_levels=TCN_LEVELS, tcn_kernel_size=TCN_KERNEL_SIZE, tcn_dropout=TCN_DROPOUT,
         transformer_d_model=TRANSFORMER_D_MODEL, transformer_nhead=TRANSFORMER_NHEAD,
         transformer_nlayers=TRANSFORMER_NLAYERS,
         num_shared_experts=NUM_SHARED_EXPERTS, moe_expert_input_dim=MOE_EXPERT_INPUT_DIM,
         moe_hidden_dim_expert=MOE_HIDDEN_DIM_EXPERT, moe_output_dim=MOE_OUTPUT_DIM,
         pred_horizons_len=len(PRED_HORIZONS), fail_horizons_len=len(FAIL_HORIZONS),
-        moe_top_k=MOE_TOP_K, moe_noise_std=MOE_NOISE_STD,  # Suggestion #6 applied in config
-        aux_loss_coeff=AUX_LOSS_COEFF,
-        entropy_reg_coeff=ENTROPY_REG_COEFF,  # Suggestion #6
-        entropy_reg_coeff_fail_rca=ENTROPY_REG_COEFF_FAIL_RCA  # Suggestion #6
+        moe_top_k=MOE_TOP_K, moe_noise_std=MOE_NOISE_STD, # Using updated MOE_NOISE_STD
+        aux_loss_coeff=AUX_LOSS_COEFF, entropy_reg_coeff=ENTROPY_REG_COEFF # Using updated ENTROPY_REG_COEFF
     ).to(DEVICE)
 
     train_dataset = MultivariateTimeSeriesDataset(TRAIN_DIR, SEQ_LEN, PRED_HORIZONS, FAIL_HORIZONS,
@@ -673,7 +658,8 @@ def train_and_save_model():
                                                   global_stds, canonical_sensor_names)
     if len(train_dataset) == 0: print("ERROR: Training dataset empty."); return
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=AMP_ENABLED)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0,
+                              pin_memory=AMP_ENABLED)
     valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0,
                               pin_memory=AMP_ENABLED) if len(valid_dataset) > 0 else None
 
@@ -693,31 +679,35 @@ def train_and_save_model():
     focal_loss_elementwise = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='none')
     focal_loss_mean = FocalLoss(alpha=FOCAL_ALPHA_PARAM, gamma=FOCAL_GAMMA, reduction='mean')
 
-    # Suggestion #2: Initialize current loss weights
-    current_w_fail = W_FAIL_INITIAL
-    current_w_rca = W_RCA_INITIAL
-
-    print("Starting multi-task training (Forecast, Fail, RCA) with updated MoE, CLS, Novelty RCA...")
+    print("Starting multi-task training (Forecast, Fail, RCA) with VECTORIZED MoE and implemented suggestions...")
     for epoch in range(EPOCHS):
-        # Suggestion #2: Anneal W_FAIL and W_RCA
-        if epoch >= ANNEAL_LOSS_WEIGHTS_START_EPOCH:
-            current_w_fail *= LOSS_WEIGHT_ANNEAL_FACTOR
-            current_w_rca *= LOSS_WEIGHT_ANNEAL_FACTOR
-            print(f"Epoch {epoch + 1}: Annealed W_FAIL to {current_w_fail:.4f}, W_RCA to {current_w_rca:.4f}")
-
         model.train()
         total_loss_epoch, total_lp_epoch, total_lf_epoch, total_lr_epoch, total_laux_epoch, total_lentr_epoch = 0, 0, 0, 0, 0, 0
         num_batches = 0
+
+        # Suggestion 2: Anneal W_FAIL and W_RCA
+        current_w_fail = W_FAIL_BASE
+        current_w_rca = W_RCA_BASE
+        if epoch >= ANNEAL_LOSS_WEIGHTS_START_EPOCH:
+            decay_exponent = epoch - ANNEAL_LOSS_WEIGHTS_START_EPOCH +1 # epoch 10 -> 0.9^1, epoch 11 -> 0.9^2
+            decay_multiplier = ANNEAL_LOSS_WEIGHTS_FACTOR ** decay_exponent
+            current_w_fail *= decay_multiplier
+            current_w_rca *= decay_multiplier
+            print(f"Epoch {epoch+1}: Annealing W_FAIL to {current_w_fail:.4f}, W_RCA to {current_w_rca:.4f}")
+
+
         for batch_idx, batch in enumerate(train_loader):
             input_feat = batch["input_features"].to(DEVICE);
             sensor_m = batch["sensor_mask"].to(DEVICE)
-            last_k_std = batch["last_known_values_globally_std"].to(DEVICE)  # For novelty & prediction target calc
+            # last_k_std is used for delta target calculation and for RCA novelty calculation
+            last_k_std = batch["last_known_values_globally_std"].to(DEVICE);
             delta_tgt_std = batch["pred_delta_targets_globally_std"].to(DEVICE)
             fail_tgt = batch["fail_targets"].to(DEVICE);
             rca_tgt = batch["rca_targets"].to(DEVICE)
 
             optimizer.zero_grad(set_to_none=True)
             with autocast(enabled=AMP_ENABLED):
+                # Pass last_k_std for novelty calculation in RCA head
                 pred_abs_std, fail_logits, rca_logits, l_aux, l_entropy = model(input_feat, sensor_m, last_k_std)
 
                 abs_target_std = last_k_std.unsqueeze(-1) + delta_tgt_std
@@ -729,9 +719,10 @@ def train_and_save_model():
                 lf = focal_loss_mean(fail_logits, fail_tgt)
 
                 lr_elements = focal_loss_elementwise(rca_logits, rca_tgt)
-                lr_masked = lr_elements * sensor_m  # rca_logits already masked by sensor_mask in forward
+                lr_masked = lr_elements * sensor_m
                 lr = lr_masked.sum() / sensor_m.sum().clamp(min=1e-9)
 
+                # Use current (possibly annealed) loss weights
                 combined_loss = W_PRED * lp + current_w_fail * lf + current_w_rca * lr + l_aux + l_entropy
 
             if torch.isnan(combined_loss) or torch.isinf(combined_loss):
@@ -766,36 +757,33 @@ def train_and_save_model():
             model.eval()
             total_val_loss, total_val_lp, total_val_lf, total_val_lr, total_val_laux, total_val_lentr = 0, 0, 0, 0, 0, 0
             num_val_batches = 0
-
-            # Suggestion #7: For AUROC/PR-AUC
-            all_val_fail_logits = []
-            all_val_fail_targets = []
+            all_fail_preds_val = [] # For AUROC/PR-AUC
+            all_fail_targets_val = [] # For AUROC/PR-AUC
 
             with torch.no_grad():
                 for batch_val in valid_loader:
                     input_feat_val = batch_val["input_features"].to(DEVICE);
                     sensor_m_val = batch_val["sensor_mask"].to(DEVICE)
-                    last_k_std_val = batch_val["last_known_values_globally_std"].to(DEVICE)  # For novelty & target
+                    last_k_std_val = batch_val["last_known_values_globally_std"].to(DEVICE);
                     delta_tgt_std_val = batch_val["pred_delta_targets_globally_std"].to(DEVICE)
                     fail_tgt_val = batch_val["fail_targets"].to(DEVICE);
                     rca_tgt_val = batch_val["rca_targets"].to(DEVICE)
-
                     with autocast(enabled=AMP_ENABLED):
-                        pred_abs_std_val, fail_logits_val, rca_logits_val, l_aux_val, l_entr_val = model(input_feat_val,
-                                                                                                         sensor_m_val,
-                                                                                                         last_k_std_val)
+                        pred_abs_std_val, fail_logits_val, rca_logits_val, l_aux_val, l_entr_val = model(
+                            input_feat_val, sensor_m_val, last_k_std_val # Pass last_k_std for novelty
+                        )
 
                         abs_target_std_val = last_k_std_val.unsqueeze(-1) + delta_tgt_std_val
                         lp_val_el = huber_loss_fn(pred_abs_std_val, abs_target_std_val)
                         lp_val = (lp_val_el * sensor_m_val.unsqueeze(-1)).sum() / (
-                                sensor_m_val.sum() * len(PRED_HORIZONS)).clamp(min=1e-9)
+                                    sensor_m_val.sum() * len(PRED_HORIZONS)).clamp(min=1e-9)
 
                         lf_val = focal_loss_mean(fail_logits_val, fail_tgt_val)
 
                         lr_val_el = focal_loss_elementwise(rca_logits_val, rca_tgt_val)
-                        lr_val = (lr_val_el * sensor_m_val).sum() / sensor_m_val.sum().clamp(
-                            min=1e-9)  # rca_logits_val already masked
+                        lr_val = (lr_val_el * sensor_m_val).sum() / sensor_m_val.sum().clamp(min=1e-9)
 
+                        # Use current (possibly annealed) loss weights for val loss reporting consistency
                         val_loss = W_PRED * lp_val + current_w_fail * lf_val + current_w_rca * lr_val + l_aux_val + l_entr_val
 
                     if not (torch.isnan(val_loss) or torch.isinf(val_loss)):
@@ -807,48 +795,45 @@ def train_and_save_model():
                         total_val_lentr += l_entr_val.item()
                         num_val_batches += 1
 
-                        all_val_fail_logits.append(fail_logits_val.cpu())
-                        all_val_fail_targets.append(fail_tgt_val.cpu())
+                        # Suggestion 7: Collect predictions and targets for AUROC/PR-AUC
+                        all_fail_preds_val.append(torch.sigmoid(fail_logits_val).cpu().numpy())
+                        all_fail_targets_val.append(fail_tgt_val.cpu().numpy())
 
             print_avg_losses(epoch, "Valid", num_val_batches, total_val_loss, total_val_lp, total_val_lf, total_val_lr,
                              total_val_laux, total_val_lentr)
 
-            # Suggestion #7: Calculate and print AUROC/PR-AUC for failure head
-            if num_val_batches > 0 and len(all_val_fail_logits) > 0:
-                val_fail_logits_all = torch.cat(all_val_fail_logits, dim=0)
-                val_fail_targets_all = torch.cat(all_val_fail_targets, dim=0)
+            # Suggestion 7: Calculate and print AUROC & PR-AUC for failure head
+            if num_val_batches > 0 and len(all_fail_preds_val) > 0:
+                all_fail_preds_val = np.concatenate(all_fail_preds_val, axis=0)
+                all_fail_targets_val = np.concatenate(all_fail_targets_val, axis=0)
 
-                aurocs, pr_aucs = [], []
-                for i_fh in range(val_fail_logits_all.shape[1])):  # Iterate over failure horizons
-                    targets_fh = val_fail_targets_all[:, i_fh].numpy()
-                preds_fh = torch.sigmoid(val_fail_logits_all[:, i_fh]).numpy()
+                if all_fail_targets_val.ndim == 2 and all_fail_preds_val.ndim == 2 and \
+                   all_fail_targets_val.shape == all_fail_preds_val.shape:
+                    auroc_scores = []
+                    pr_auc_scores = []
+                    for i_fh in range(all_fail_targets_val.shape[1]): # Iterate over fail horizons
+                        targets_fh = all_fail_targets_val[:, i_fh]
+                        preds_fh = all_fail_preds_val[:, i_fh]
+                        if len(np.unique(targets_fh)) > 1: # Check if there are both classes present
+                            try:
+                                auroc = roc_auc_score(targets_fh, preds_fh)
+                                pr_auc = average_precision_score(targets_fh, preds_fh)
+                                auroc_scores.append(auroc)
+                                pr_auc_scores.append(pr_auc)
+                            except ValueError as e:
+                                print(f"  Skipping metrics for fail horizon {FAIL_HORIZONS[i_fh]}: {e}")
+                        else:
+                            print(f"  Skipping metrics for fail horizon {FAIL_HORIZONS[i_fh]} (single class in targets)")
 
-                if len(np.unique(targets_fh)) > 1:  # AUROC/PR-AUC require at least two classes
-                    try:
-                        aurocs.append(roc_auc_score(targets_fh, preds_fh))
-                        pr_aucs.append(average_precision_score(targets_fh, preds_fh))
-                    except ValueError as e:  # Should be caught by UndefinedMetricWarning mostly
-                        print(f"Could not compute AUROC/PR-AUC for horizon {FAIL_HORIZONS[i_fh]}: {e}")
-                        aurocs.append(float('nan'))
-                        pr_aucs.append(float('nan'))
-                    else:
-                        aurocs.append(float('nan'))  # Or 0.5 if preferred for single class
-                        pr_aucs.append(float('nan'))  # Or baseline if preferred
+                    if auroc_scores: # if any scores were computed
+                         print(f"  Avg Valid Fail AUROC: {np.mean(auroc_scores):.4f} (Horizons: {FAIL_HORIZONS})")
+                         print(f"  Avg Valid Fail PR-AUC: {np.mean(pr_auc_scores):.4f} (Horizons: {FAIL_HORIZONS})")
+                else:
+                    print("  Could not compute AUROC/PR-AUC due to shape mismatch or empty arrays.")
 
-                avg_auroc = np.nanmean(aurocs) if len(aurocs) > 0 else float('nan')
-                avg_pr_auc = np.nanmean(pr_aucs) if len(pr_aucs) > 0 else float('nan')
-                print(f"E{epoch + 1} Valid Fail Head Avg AUROC: {avg_auroc:.4f}, Avg PR-AUC: {avg_pr_auc:.4f}")
-                # Detailed per horizon:
-                # for i, fh_val in enumerate(FAIL_HORIZONS):
-                # print(f"  Horizon {fh_val}: AUROC={aurocs[i]:.4f}, PR-AUC={pr_aucs[i]:.4f}")
 
     torch.save(model.state_dict(), MODEL_SAVE_PATH)
     print(f"Training complete. Model: {MODEL_SAVE_PATH}, Preprocessor: {PREPROCESSOR_SAVE_PATH}")
-    print("--- Note on Temperature Scaling (Suggestion #7) ---")
-    print("After training, temperature scaling can be applied to the failure head's logits to calibrate probabilities.")
-    print("This involves finding a scalar 'temperature' T by optimizing on a validation set:")
-    print("  calibrated_probs = softmax(logits / T)")
-    print("This step is typically done post-training and is not included in this script's main loop.")
 
 
 def print_avg_losses(epoch, phase, num_batches, total_loss, lp, lf, lr, laux, lentr):
@@ -858,16 +843,57 @@ def print_avg_losses(epoch, phase, num_batches, total_loss, lp, lf, lr, laux, le
     else:
         print(f"E{epoch + 1} No batches processed for {phase} phase.")
 
+# Suggestion 7: Temperature Scaling (to be applied post-training)
+def temperature_scale(logits, temperature):
+    """
+    Applies temperature scaling to logits.
+    Args:
+        logits (torch.Tensor): The logits from the model.
+        temperature (torch.nn.Parameter or float): The temperature value.
+    Returns:
+        torch.Tensor: Calibrated probabilities.
+    """
+    return torch.softmax(logits / temperature, dim=-1)
+
+# Example of how temperature might be found (very simplified, typically needs a validation set)
+# def find_temperature(model, valid_loader, device):
+#     model.eval()
+#     all_logits = []
+#     all_targets = []
+#     with torch.no_grad():
+#         for batch in valid_loader:
+#             # ... get inputs, targets ...
+#             # _, fail_logits, _, _, _ = model(input_feat.to(device), sensor_m.to(device), last_k.to(device))
+#             # all_logits.append(fail_logits)
+#             # all_targets.append(fail_tgt) # Assuming fail_tgt are class indices for NLLLoss
+#             pass # Placeholder for actual data loading and model inference
+#
+#     if not all_logits: return torch.tensor(1.0) # Default temperature
+#
+#     all_logits = torch.cat(all_logits).to(device)
+#     all_targets = torch.cat(all_targets).to(device)
+#
+#     temperature = nn.Parameter(torch.ones(1).to(device))
+#     optimizer = optim.LBFGS([temperature], lr=0.01, max_iter=50) # Or Adam, etc.
+#     nll_criterion = nn.CrossEntropyLoss() # If targets are class indices
+#
+#     def eval_temp():
+#         optimizer.zero_grad()
+#         loss = nll_criterion(all_logits / temperature, all_targets)
+#         loss.backward()
+#         return loss
+#
+#     optimizer.step(eval_temp)
+#     return temperature.item()
+
 
 if __name__ == '__main__':
-    print("--- Script Version: Multi-Task Foundational Model with Implemented Suggestions ---")
-    print(f"Main suggestions implemented:")
-    print("  2. Turned up loss weights for classification (W_FAIL, W_RCA) and annealing.")
-    print("  3. Failure head gets temporal context via CLS token from PerSensorEncoderTCN.")
-    print("  5. RCA scores depend on novelty (forecast delta).")
-    print("  6. Tuned router regularizers (MOE_NOISE_STD, separate ENTROPY_REG_COEFF for fail/RCA).")
-    print("  7. Added AUROC/PR-AUC callback for failure head.")
+    print(
+        "--- Script Version: Multi-Task Foundational Model with Implemented Suggestions (v4) ---")
     print(f"IMPORTANT: TRAIN_DIR ('{TRAIN_DIR}') and VALID_DIR ('{VALID_DIR}') must be set correctly.")
     if BASE_DATA_DIR == "../../data/time_series/1": print(
         "\nWARNING: Using default example BASE_DATA_DIR. Paths might be incorrect.\n")
     train_and_save_model()
+    print("\nSuggestion 7 Reminder: Temperature scaling for the failure head's $\phi$-values should be performed post-training.")
+    print("A 'temperature_scale' function is provided as a utility. You would typically find the optimal")
+    print("temperature value on a validation set after the main training is complete and then apply it.")
