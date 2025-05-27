@@ -14,10 +14,11 @@ BASE_DATA_DIR = "../../data/time_series/1"  # Example, adjust if needed
 VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")  # <<< SET THIS (TestData Source)
 
 # Model & Task Parameters (from latest training script)
-# These will mostly be overridden by the preprocessor file if found
+# Many of these will be overridden by the loaded preprocessor file for consistency
 SEQ_LEN = 64
 PRED_HORIZONS = [1, 3, 5]
-# FAIL_HORIZONS, RCA_FAILURE_LOOKAHEAD, HAZARD_HEAD_MAX_HORIZON, SENSOR_DRIFT_THRESHOLD_STD will be loaded or inferred from preprocessor
+# FAIL_HORIZONS, RCA_FAILURE_LOOKAHEAD, HAZARD_HEAD_MAX_HORIZON, SENSOR_DRIFT_THRESHOLD_STD
+# will be loaded from preprocessor if available.
 
 # Architectural Params (from latest training script)
 SENSOR_INPUT_DIM = 1
@@ -38,11 +39,11 @@ MOE_HIDDEN_DIM_EXPERT = 128
 MOE_OUTPUT_DIM = 64
 MOE_TOP_K = 2
 MOE_NOISE_STD = 0.0  # For eval, noise is off.
-AUX_LOSS_COEFF = 0.01  # For MoE load balancing (model output, not used in test loss)
-ENTROPY_REG_COEFF = 0.001  # (model output, not used in test loss)
+AUX_LOSS_COEFF = 0.01  # Not used in test script loss calculation
+ENTROPY_REG_COEFF = 0.001  # Not used in test script loss calculation
 
 # Testing Params
-TEST_BATCH_SIZE = 4
+TEST_BATCH_SIZE = 4  # Reduced for quicker testing, can be increased
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_BATCHES_TO_TEST = 5
 SAMPLES_PER_BATCH_TO_PRINT = 2
@@ -94,7 +95,7 @@ class TemporalBlock(nn.Module):
         return self.relu_out(out + res)
 
 
-# --- Per-Sensor TCN Encoder (from latest training script - with CLS Token) ---
+# --- Per-Sensor TCN Encoder (from latest training script) ---
 class PerSensorEncoderTCN(nn.Module):
     def __init__(self, input_dim, proj_dim, tcn_out_dim, seq_len, num_levels, kernel_size, dropout):
         super(PerSensorEncoderTCN, self).__init__()
@@ -175,12 +176,13 @@ class HazardHead(nn.Module):
         return torch.sigmoid(self.fc(z))
 
 
-# --- Test Dataset (Adapted from latest training dataset for v6) ---
+# --- Test Dataset (Adapted from latest training dataset) ---
 class TestMultivariateTimeSeriesDataset(Dataset):
     def __init__(self, data_dir, seq_len, pred_horizons,
                  eval_fail_horizons, rca_failure_lookahead, model_max_sensors_dim,
                  global_means, global_stds, canonical_sensor_names,
-                 hazard_max_horizon):
+                 hazard_max_horizon,
+                 sensor_drift_std_thresh=None):  # sensor_drift_std_thresh is for info, not used for GT here
         self.data_dir = data_dir;
         self.seq_len = seq_len
         self.pred_horizons = pred_horizons
@@ -192,6 +194,7 @@ class TestMultivariateTimeSeriesDataset(Dataset):
         self.canonical_sensor_names = canonical_sensor_names
         self.num_globally_normed_features = len(canonical_sensor_names)
         self.hazard_max_horizon = hazard_max_horizon
+        self.sensor_drift_std_thresh = sensor_drift_std_thresh  # Store if provided
 
         self.file_paths = glob.glob(os.path.join(data_dir, "*.csv"));
         self.data_cache = [];
@@ -248,14 +251,13 @@ class TestMultivariateTimeSeriesDataset(Dataset):
         features_normalized_aligned = item_data["features_normalized_globally"]
         flags_full = item_data["failure_flags"];
         filepath = item_data["filepath"]
-        input_slice_normed_full_potential = features_normalized_aligned[
-                                            window_start_idx: window_start_idx + self.seq_len]
+        input_slice_normed_full = features_normalized_aligned[window_start_idx: window_start_idx + self.seq_len]
 
         padded_input_normed = np.zeros((self.seq_len, self.model_max_sensors_dim), dtype=np.float32)
         sensor_mask = np.zeros(self.model_max_sensors_dim, dtype=np.float32)
         num_to_copy = min(self.num_globally_normed_features, self.model_max_sensors_dim)
 
-        current_input_slice_normed = input_slice_normed_full_potential[:, :num_to_copy]
+        current_input_slice_normed = input_slice_normed_full[:, :num_to_copy]
         padded_input_normed[:, :num_to_copy] = current_input_slice_normed
 
         for k_idx in range(num_to_copy):
@@ -285,15 +287,17 @@ class TestMultivariateTimeSeriesDataset(Dataset):
             future_lookahead_raw_slice = raw_features_aligned[start_r:end_r, :num_to_copy]
             for k_idx in range(num_to_copy):
                 if sensor_mask[k_idx] > 0:
-                    sensor_data_current_window_raw = current_window_raw_slice[:, k_idx]
+                    sensor_data_current_window_raw = current_window_raw_slice[:, k_idx];
                     sensor_data_future_lookahead_raw = future_lookahead_raw_slice[:, k_idx]
-                    valid_current_raw = sensor_data_current_window_raw[~np.isnan(sensor_data_current_window_raw)]
+                    valid_current_raw = sensor_data_current_window_raw[~np.isnan(sensor_data_current_window_raw)];
                     valid_future_raw = sensor_data_future_lookahead_raw[~np.isnan(sensor_data_future_lookahead_raw)]
                     if len(valid_current_raw) > 0 and len(valid_future_raw) > 0:
                         mean_current_raw = np.mean(valid_current_raw);
                         std_current_raw = max(np.std(valid_current_raw), 1e-6)
                         if np.any(np.abs(valid_future_raw - mean_current_raw) > 3 * std_current_raw): rca_targets[
                             k_idx] = 1.0
+
+        # Test dataset does not generate sensor_drift_labels as GT. Model will output predictions for it.
 
         return {"input_features": torch.from_numpy(padded_input_normed), "sensor_mask": torch.from_numpy(sensor_mask),
                 "last_known_values_globally_std": torch.from_numpy(last_known_normed),
@@ -303,7 +307,7 @@ class TestMultivariateTimeSeriesDataset(Dataset):
                 "filepath": filepath, "window_start_idx": window_start_idx}
 
 
-# --- Foundational Multi-Task Model (Adapted for Test from v6 Training Script) ---
+# --- Foundational Multi-Task Model (from latest training script v6_survival_enhanced) ---
 class FoundationalTimeSeriesModel(nn.Module):
     def __init__(self, model_max_sensors, seq_len,
                  sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim,
@@ -311,7 +315,7 @@ class FoundationalTimeSeriesModel(nn.Module):
                  transformer_d_model, transformer_nhead, transformer_nlayers,
                  num_shared_experts, moe_expert_input_dim, moe_hidden_dim_expert, moe_output_dim,
                  pred_horizons_len, hazard_max_horizon,
-                 moe_top_k, moe_noise_std, aux_loss_coeff, entropy_reg_coeff):  # Matched to training init
+                 moe_top_k, moe_noise_std, aux_loss_coeff, entropy_reg_coeff):
         super().__init__()
         self.model_max_sensors = model_max_sensors;
         self.seq_len = seq_len
@@ -320,10 +324,9 @@ class FoundationalTimeSeriesModel(nn.Module):
         self.transformer_d_model = transformer_d_model;
         self.sensor_tcn_out_dim = sensor_tcn_out_dim
         self.moe_top_k = moe_top_k;
-        self.moe_noise_std = moe_noise_std  # Will be 0.0 during model.eval() if logic inside _apply_moe_topk uses self.training
-        self.aux_loss_coeff = aux_loss_coeff;  # For MoE balancing loss calculation
+        self.moe_noise_std = moe_noise_std  # For training, 0.0 in eval
+        self.aux_loss_coeff = aux_loss_coeff;  # For MoE load balancing
         self.entropy_reg_coeff = entropy_reg_coeff
-
         self.hazard_max_horizon = hazard_max_horizon
 
         self.per_sensor_encoder = PerSensorEncoderTCN(sensor_input_dim, sensor_tcn_proj_dim, sensor_tcn_out_dim,
@@ -334,9 +337,8 @@ class FoundationalTimeSeriesModel(nn.Module):
                                                                transformer_nlayers, model_max_sensors)
         self.experts_shared = nn.ModuleList(
             [Expert(moe_expert_input_dim, moe_hidden_dim_expert, moe_output_dim) for _ in range(num_shared_experts)])
-
         gate_input_dim_global_forecast_fail = transformer_d_model * 2 + sensor_tcn_out_dim
-        gate_input_dim_rca_token = transformer_d_model  # This was correct in training
+        gate_input_dim_rca_token = transformer_d_model
         self.gates = nn.ModuleDict({
             "forecast": GatingNetwork(gate_input_dim_global_forecast_fail, num_shared_experts),
             "fail": GatingNetwork(gate_input_dim_global_forecast_fail, num_shared_experts),
@@ -346,13 +348,14 @@ class FoundationalTimeSeriesModel(nn.Module):
         self.hazard_head = HazardHead(moe_output_dim, self.hazard_max_horizon)
         rca_head_input_dim = sensor_tcn_out_dim + transformer_d_model + moe_output_dim + 1
         self.rca_head = nn.Linear(rca_head_input_dim, 1)
-        # NOTE: SensorDriftHead is OMITTED for the test script model definition as it's a training-only auxiliary task.
 
-    def _apply_moe_topk(self, x_expert_input, gate_input, gate_network, experts_modulelist, k, noise_std_param):
+        # New Sensor Drift Head
+        self.sensor_drift_head = nn.Linear(sensor_tcn_out_dim + transformer_d_model, 1)
+
+    def _apply_moe_topk(self, x_expert_input, gate_input, gate_network, experts_modulelist, k, noise_std):
         logits = gate_network(gate_input)
-        # Use self.training to control noise, noise_std_param is the configured value for training
-        if self.training and noise_std_param > 0:
-            logits = logits + torch.randn_like(logits) * noise_std_param
+        # In eval mode (self.training is False), noise_std passed from forward should be 0.0
+        if self.training and noise_std > 0: logits = logits + torch.randn_like(logits) * noise_std
 
         num_experts = len(experts_modulelist);
         eff_k = min(k, num_experts)
@@ -360,8 +363,8 @@ class FoundationalTimeSeriesModel(nn.Module):
         topk_w = torch.softmax(topk_val, dim=-1)
 
         all_out = torch.stack([e(x_expert_input) for e in experts_modulelist], dim=1)
-        expert_output_dim = all_out.size(-1)
 
+        expert_output_dim = all_out.size(-1)
         gather_idx_shape = list(topk_idx.shape) + [expert_output_dim]
         gather_idx = topk_idx.unsqueeze(-1).expand(gather_idx_shape)
 
@@ -370,6 +373,7 @@ class FoundationalTimeSeriesModel(nn.Module):
 
         router_prob_for_loss = torch.softmax(logits, -1);
         avg_router_prob = router_prob_for_loss.mean(0)
+
         ones_for_scatter = torch.ones_like(topk_idx, dtype=router_prob_for_loss.dtype).reshape(-1)
         num_items_processed = x_expert_input.size(0) if x_expert_input.ndim > 1 else 1
 
@@ -409,15 +413,16 @@ class FoundationalTimeSeriesModel(nn.Module):
 
         router_input_global_forecast_fail = torch.cat([mean_ctx_global, std_ctx_global, h_cls_global_avg], dim=-1)
 
-        # MOE_NOISE_STD is passed to _apply_moe_topk, which uses self.training to decide if noise is applied.
-        # For test script model.eval() means self.training=False, so no noise.
+        # For eval mode, self.training is False, so moe_noise_std is effectively 0
+        moe_noise_effective = 0.0 if not self.training else self.moe_noise_std
+
         moe_forecast_output, aux_f, logits_f = self._apply_moe_topk(
             mean_ctx_global, router_input_global_forecast_fail, self.gates["forecast"], self.experts_shared,
-            self.moe_top_k, self.moe_noise_std
+            self.moe_top_k, moe_noise_effective
         )
         moe_fail_output, aux_fail, logits_fail = self._apply_moe_topk(
             mean_ctx_global, router_input_global_forecast_fail, self.gates["fail"], self.experts_shared,
-            self.moe_top_k, self.moe_noise_std
+            self.moe_top_k, moe_noise_effective
         )
 
         x_flat_rca_expert_input = cross_sensor_context_masked.reshape(-1, self.transformer_d_model)
@@ -425,26 +430,25 @@ class FoundationalTimeSeriesModel(nn.Module):
         x_flat_rca_expert_input_valid = x_flat_rca_expert_input[valid_token_mask_rca]
 
         moe_rca_output_flat_valid = torch.empty(0, self.moe_output_dim, device=x_features_globally_std.device,
-                                                dtype=moe_forecast_output.dtype)  # Ensure correct dtype
+                                                dtype=moe_forecast_output.dtype)
         aux_rca = torch.tensor(0.0, device=x_features_globally_std.device);
         logits_rca_valid = None
         if x_flat_rca_expert_input_valid.size(0) > 0:
             x_flat_rca_gate_input_valid = x_flat_rca_expert_input_valid
             moe_rca_output_flat_valid, aux_rca, logits_rca_valid = self._apply_moe_topk(
                 x_flat_rca_expert_input_valid, x_flat_rca_gate_input_valid, self.gates["rca"], self.experts_shared,
-                self.moe_top_k, self.moe_noise_std
+                self.moe_top_k, moe_noise_effective
             )
 
         moe_rca_output_flat = torch.zeros(batch_size * self.model_max_sensors, self.moe_output_dim,
-                                          device=x_features_globally_std.device,
-                                          dtype=moe_forecast_output.dtype)  # Ensure correct dtype
+                                          device=x_features_globally_std.device, dtype=moe_forecast_output.dtype)
         if x_flat_rca_expert_input_valid.size(0) > 0: moe_rca_output_flat[
             valid_token_mask_rca] = moe_rca_output_flat_valid
 
         total_moe_aux_loss = self.aux_loss_coeff * (aux_f + aux_fail + aux_rca)  # Renamed for clarity
 
         total_entropy_loss = torch.tensor(0.0, device=x_features_globally_std.device)
-        if self.entropy_reg_coeff > 0:  # self.training is False, but these losses can still be computed
+        if self.entropy_reg_coeff > 0:  # and self.training: # Entropy typically only regularized during training
             for gate_logits_set in [logits_f, logits_fail, logits_rca_valid]:
                 if gate_logits_set is not None and gate_logits_set.numel() > 0:
                     probs = F.softmax(gate_logits_set, dim=-1);
@@ -478,18 +482,22 @@ class FoundationalTimeSeriesModel(nn.Module):
         rca_logits_flat = self.rca_head(rca_head_input_flat).squeeze(-1)
         rca_logits = rca_logits_flat.view(batch_size, self.model_max_sensors)
 
-        # Sensor drift logits are NOT returned in test script model.
+        # Sensor Drift Prediction
+        sensor_drift_head_input = torch.cat([h_cls_per_sensor_masked, cross_sensor_context_masked], dim=-1)
+        sensor_drift_logits = self.sensor_drift_head(sensor_drift_head_input).squeeze(-1)
+
         return (pred_abs_globally_std, hazard_rates, cumulative_survival_probs, rca_logits,
-                total_moe_aux_loss, total_entropy_loss)
+                total_moe_aux_loss, total_entropy_loss, sensor_drift_logits)  # Added sensor_drift_logits
 
 
 # --- Test Script Logic ---
 def test_model():
-    print(f"--- Test Script for Foundational Multi-Task MoE Model (Version 6 Survival Enhanced) ---")
+    print(f"--- Test Script for Foundational Multi-Task Model (Version 6 Survival Enhanced) ---")
     print(f"Using device: {DEVICE}")
     print(f"Loading model from: {MODEL_LOAD_PATH}")
     print(f"Loading preprocessor from: {PREPROCESSOR_LOAD_PATH}")
 
+    # 1. Load Preprocessor Config
     try:
         preprocessor_data = np.load(PREPROCESSOR_LOAD_PATH, allow_pickle=True)
         global_means = preprocessor_data['global_means']
@@ -498,16 +506,15 @@ def test_model():
         model_max_sensors_dim = int(preprocessor_data['model_max_sensors_dim'])
         loaded_seq_len = int(preprocessor_data['seq_len'])
         loaded_pred_horizons = list(preprocessor_data['pred_horizons'])
-        loaded_eval_fail_horizons = list(
-            preprocessor_data.get('fail_horizons', [3, 5, 10]))  # Original name in preproc was fail_horizons
+
+        # Default values from original training script if not in preprocessor
+        default_fail_horizons = [3, 5, 10]
+        loaded_eval_fail_horizons = list(preprocessor_data.get('fail_horizons', default_fail_horizons))
         loaded_rca_lookahead = int(preprocessor_data.get('rca_failure_lookahead', loaded_eval_fail_horizons[
             0] if loaded_eval_fail_horizons else 3))
         loaded_hazard_max_horizon = int(preprocessor_data.get('hazard_max_horizon',
                                                               max(loaded_eval_fail_horizons) if loaded_eval_fail_horizons else 10))
-        # sensor_drift_std_thresh may also be in the preprocessor, but not used by this test script.
-        if 'sensor_drift_std_thresh' in preprocessor_data:
-            print(
-                f"  (Preprocessor also contains 'sensor_drift_std_thresh': {preprocessor_data['sensor_drift_std_thresh']})")
+        loaded_sensor_drift_std_thresh = float(preprocessor_data.get('sensor_drift_std_thresh', 2.0))  # New
 
         script_seq_len = loaded_seq_len
         script_pred_horizons = loaded_pred_horizons
@@ -521,14 +528,15 @@ def test_model():
         return
     except KeyError as e:
         print(
-            f"ERROR: Missing key {e} in preprocessor file '{PREPROCESSOR_LOAD_PATH}'. Ensure it's from the v6 training. Exiting.");
+            f"ERROR: Missing key {e} in preprocessor file '{PREPROCESSOR_LOAD_PATH}'. Ensure it's from the correct training version. Exiting.");
         return
 
     print(
         f"Preprocessor loaded: model_max_sensors_dim={model_max_sensors_dim}, {len(canonical_sensor_names)} canonical sensors.")
     print(
-        f"Using Eval Fail Horizons: {loaded_eval_fail_horizons}, RCA Lookahead: {loaded_rca_lookahead}, Hazard Max Horizon: {loaded_hazard_max_horizon}")
+        f"Using Eval Fail Horizons: {loaded_eval_fail_horizons}, RCA Lookahead: {loaded_rca_lookahead}, Hazard Max Horizon: {loaded_hazard_max_horizon}, Sensor Drift Std Thresh: {loaded_sensor_drift_std_thresh}")
 
+    # 2. Initialize Dataset and DataLoader
     if not (os.path.exists(VALID_DIR) and os.path.isdir(VALID_DIR)):
         print(f"ERROR: Test data directory '{VALID_DIR}' missing or not a directory.");
         return
@@ -539,26 +547,29 @@ def test_model():
         rca_failure_lookahead=loaded_rca_lookahead,
         model_max_sensors_dim=model_max_sensors_dim, global_means=global_means,
         global_stds=global_stds, canonical_sensor_names=canonical_sensor_names,
-        hazard_max_horizon=loaded_hazard_max_horizon
+        hazard_max_horizon=loaded_hazard_max_horizon,
+        sensor_drift_std_thresh=loaded_sensor_drift_std_thresh  # Pass to dataset
     )
     if len(test_dataset) == 0: print(f"No data in {VALID_DIR} or no valid windows. Exiting."); return
     test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=False, num_workers=0)
 
+    # 3. Initialize Model
     model = FoundationalTimeSeriesModel(
         model_max_sensors=model_max_sensors_dim, seq_len=script_seq_len,
         sensor_input_dim=SENSOR_INPUT_DIM, sensor_tcn_proj_dim=SENSOR_TCN_PROJ_DIM,
         sensor_tcn_out_dim=SENSOR_TCN_OUT_DIM, tcn_levels=TCN_LEVELS,
-        tcn_kernel_size=TCN_KERNEL_SIZE, tcn_dropout=TCN_DROPOUT,  # Dropout is ineffective due to model.eval()
+        tcn_kernel_size=TCN_KERNEL_SIZE, tcn_dropout=TCN_DROPOUT,  # Will be set to eval mode
         transformer_d_model=TRANSFORMER_D_MODEL, transformer_nhead=TRANSFORMER_NHEAD,
         transformer_nlayers=TRANSFORMER_NLAYERS,
         num_shared_experts=NUM_SHARED_EXPERTS, moe_expert_input_dim=MOE_EXPERT_INPUT_DIM,
         moe_hidden_dim_expert=MOE_HIDDEN_DIM_EXPERT, moe_output_dim=MOE_OUTPUT_DIM,
         pred_horizons_len=len(script_pred_horizons),
         hazard_max_horizon=loaded_hazard_max_horizon,
-        moe_top_k=MOE_TOP_K, moe_noise_std=MOE_NOISE_STD,  # MOE_NOISE_STD is 0.0 for test
-        aux_loss_coeff=AUX_LOSS_COEFF, entropy_reg_coeff=ENTROPY_REG_COEFF
+        moe_top_k=MOE_TOP_K, moe_noise_std=MOE_NOISE_STD,  # MOE_NOISE_STD = 0.0 for eval
+        aux_loss_coeff=AUX_LOSS_COEFF, entropy_reg_coeff=ENTROPY_REG_COEFF  # Not used for loss calculation
     ).to(DEVICE)
 
+    # 4. Load Trained Model Weights
     try:
         model.load_state_dict(torch.load(MODEL_LOAD_PATH, map_location=DEVICE))
     except FileNotFoundError:
@@ -567,9 +578,10 @@ def test_model():
     except RuntimeError as e:
         print(f"ERROR loading model state: {e}. Ensure architecture matches. Exiting.");
         return
-    model.eval();
+    model.eval();  # Set model to evaluation mode
     print("Model loaded and in evaluation mode.")
 
+    # 5. Perform Inference and Print Results
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(test_loader):
             if batch_idx >= MAX_BATCHES_TO_TEST: print(
@@ -578,19 +590,18 @@ def test_model():
 
             input_globally_std = batch_data["input_features"].to(DEVICE)
             sensor_m = batch_data["sensor_mask"].to(DEVICE)
-            last_k_std_gt = batch_data["last_known_values_globally_std"].to(DEVICE)  # Used as input to model
-            delta_tgt_std_gt = batch_data["pred_delta_targets_globally_std"].to(DEVICE)  # For GT calculation
+            last_k_std_gt = batch_data["last_known_values_globally_std"].to(DEVICE)  # Used for novelty input to model
+            delta_tgt_std_gt = batch_data["pred_delta_targets_globally_std"].to(DEVICE)  # For forecast GT
             eval_fail_tgt_binary_gt = batch_data["eval_fail_targets_binary"].to(DEVICE)
             rca_tgt_gt = batch_data["rca_targets"].to(DEVICE)
 
-            # Model call returns: pred_abs_globally_std, hazard_rates, cumulative_survival_probs, rca_logits, total_moe_aux_loss, total_entropy_loss
-            pred_abs_globally_std, hazard_rates, cumulative_survival_probs, rca_logits, moe_aux_loss_val, entropy_loss_val = model(
+            # Unpack all outputs from the model, including sensor_drift_logits
+            pred_abs_globally_std, hazard_rates, cumulative_survival_probs, rca_logits, \
+                _moe_aux_loss, _entropy_loss, sensor_drift_logits = model(
                 input_globally_std, sensor_m, last_k_std_gt
-                # last_k_std_gt is last_known_values_globally_std_for_novelty
             )
-            # moe_aux_loss_val and entropy_loss_val are not typically used in test printouts but are model outputs
 
-            actual_abs_targets_std = last_k_std_gt.unsqueeze(-1) + delta_tgt_std_gt  # Calculate GT forecast targets
+            actual_abs_targets_std = last_k_std_gt.unsqueeze(-1) + delta_tgt_std_gt
 
             num_samples_to_print = min(SAMPLES_PER_BATCH_TO_PRINT, input_globally_std.size(0))
             for i in range(num_samples_to_print):
@@ -603,8 +614,8 @@ def test_model():
                 print("    Forecast (Globally Standardized Space):")
                 for h_idx, horizon_val in enumerate(script_pred_horizons):
                     print(f"      H={horizon_val}:")
-                    for s_local_idx, s_global_model_idx in enumerate(active_sensor_indices[:min(3,
-                                                                                                len(active_sensor_indices))]):  # Print for first few active sensors
+                    for s_local_idx, s_global_model_idx in enumerate(
+                            active_sensor_indices[:min(3, len(active_sensor_indices))]):
                         gt_val = actual_abs_targets_std[i, s_global_model_idx, h_idx].item()
                         pred_val = pred_abs_globally_std[i, s_global_model_idx, h_idx].item()
                         s_name = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(
@@ -616,8 +627,7 @@ def test_model():
                 gt_fail_status_sample = eval_fail_tgt_binary_gt[i].cpu().tolist()
                 for h_idx, horizon_val in enumerate(loaded_eval_fail_horizons):
                     if horizon_val <= loaded_hazard_max_horizon:
-                        prob_survival_at_h = cumulative_survival_probs[
-                            i, horizon_val - 1].item()  # horizon_val is 1-indexed
+                        prob_survival_at_h = cumulative_survival_probs[i, horizon_val - 1].item()
                         prob_fail_by_h = 1.0 - prob_survival_at_h
                         print(
                             f"      Next {horizon_val} steps: GT Fail={gt_fail_status_sample[h_idx]:.0f}, Pred P(Fail)={prob_fail_by_h:.3f} (S_{horizon_val}={prob_survival_at_h:.3f})")
@@ -626,41 +636,27 @@ def test_model():
                             f"      Next {horizon_val} steps: GT Fail={gt_fail_status_sample[h_idx]:.0f}, Pred P(Fail)=N/A (horizon > max hazard pred range)")
 
                 print("    RCA Prediction (Sigmoid Scores):")
-                rca_eval_condition = False
+                # Logic for RCA relevance condition remains similar
+                rca_eval_condition = False;
                 prob_fail_for_rca_horizon = 0.0
-                try:
-                    if loaded_rca_lookahead <= loaded_hazard_max_horizon:
-                        prob_survival_at_rca_lh = cumulative_survival_probs[i, loaded_rca_lookahead - 1].item()
-                        prob_fail_for_rca_horizon = 1.0 - prob_survival_at_rca_lh
-
-                        gt_fail_status_rca_lh = 0.0  # Default if not found
-                        if loaded_rca_lookahead in loaded_eval_fail_horizons:
-                            gt_fail_at_rca_lh_idx = loaded_eval_fail_horizons.index(loaded_rca_lookahead)
-                            gt_fail_status_rca_lh = gt_fail_status_sample[gt_fail_at_rca_lh_idx]
-                        else:  # If RCA lookahead isn't one of the eval_fail_horizons, we might not have a direct binary GT for it.
-                            print(
-                                f"      (Note: RCA lookahead {loaded_rca_lookahead} not in eval_fail_horizons {loaded_eval_fail_horizons}, GT fail status for this specific horizon might not be directly comparable from eval_fail_targets_binary)")
-
-                        # Condition to display RCA: if model predicts high chance of failure OR GT indicates failure for that horizon
-                        # Using a simple threshold (e.g., 0.5) for predicted probability.
-                        # Or, use the RCA_SURVIVAL_THRESHOLD from training if a fixed value is desired for display logic.
-                        # For now, just display if predicted P(Fail) > 0.3 or actual GT failure.
-                        display_rca_threshold = 0.3  # Arbitrary for display
-                        rca_eval_condition = prob_fail_for_rca_horizon > display_rca_threshold or gt_fail_status_rca_lh == 1.0
+                if loaded_rca_lookahead <= loaded_hazard_max_horizon:
+                    prob_survival_at_rca_lh = cumulative_survival_probs[i, loaded_rca_lookahead - 1].item()
+                    prob_fail_for_rca_horizon = 1.0 - prob_survival_at_rca_lh
+                    if loaded_rca_lookahead in loaded_eval_fail_horizons:
+                        gt_fail_at_rca_lh_idx = loaded_eval_fail_horizons.index(loaded_rca_lookahead)
+                        gt_fail_status_rca_lh = gt_fail_status_sample[gt_fail_at_rca_lh_idx]
+                        rca_eval_condition = prob_fail_for_rca_horizon > 0.5 or gt_fail_status_rca_lh == 1.0
                     else:
-                        print(
-                            f"      Warning: RCA_FAILURE_LOOKAHEAD ({loaded_rca_lookahead}) > HAZARD_MAX_HORIZON ({loaded_hazard_max_horizon}).")
-                        rca_eval_condition = True  # Show by default if condition is unclear
-                except (ValueError, IndexError) as e:
-                    print(f"      Warning: RCA condition check error: {e}. Showing RCA by default.")
-                    rca_eval_condition = True
+                        rca_eval_condition = prob_fail_for_rca_horizon > 0.5  # Fallback if no direct GT for this horizon
+                else:
+                    rca_eval_condition = True  # Show if condition cannot be checked reliably
 
                 if rca_eval_condition:
                     pred_rca_scores = torch.sigmoid(rca_logits[i]).cpu().tolist()
                     print(
                         f"      (RCA relevant for {loaded_rca_lookahead}-step horizon, P(Fail)={prob_fail_for_rca_horizon:.3f}):")
-                    for s_local_idx, s_global_model_idx in enumerate(active_sensor_indices[:min(5,
-                                                                                                len(active_sensor_indices))]):  # Print for first few active sensors
+                    for s_local_idx, s_global_model_idx in enumerate(
+                            active_sensor_indices[:min(5, len(active_sensor_indices))]):
                         s_name = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(
                             canonical_sensor_names) else f"Sensor Pad {s_global_model_idx + 1}"
                         score = pred_rca_scores[s_global_model_idx]
@@ -669,7 +665,19 @@ def test_model():
                             f"        {s_name} (idx {s_global_model_idx}): Pred Score={score:.3f}, GT RCA={gt_rca:.0f}")
                 else:
                     print(
-                        f"      (RCA not actively displayed for {loaded_rca_lookahead}-step horizon based on P(Fail)={prob_fail_for_rca_horizon:.3f})")
+                        f"      (RCA not actively evaluated for {loaded_rca_lookahead}-step horizon based on this sample's P(Fail)={prob_fail_for_rca_horizon:.3f})")
+
+                # Print Sensor Drift Predictions
+                print("    Sensor Drift Prediction (Sigmoid Scores):")
+                pred_drift_scores = torch.sigmoid(sensor_drift_logits[i]).cpu().tolist()
+                # Test dataset doesn't have GT for drift, so just print predictions
+                for s_local_idx, s_global_model_idx in enumerate(
+                        active_sensor_indices[:min(5, len(active_sensor_indices))]):
+                    s_name = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(
+                        canonical_sensor_names) else f"Sensor Pad {s_global_model_idx + 1}"
+                    score = pred_drift_scores[s_global_model_idx]
+                    print(f"        {s_name} (idx {s_global_model_idx}): Pred Drift Score={score:.3f}")
+
     print("\n--- Testing Script Finished ---")
 
 
