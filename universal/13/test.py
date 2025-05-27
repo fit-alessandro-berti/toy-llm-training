@@ -1,6 +1,7 @@
 import os
 import glob
-import math
+import math  # Added
+import random  # Added
 import numpy as np
 import pandas as pd
 import torch
@@ -14,10 +15,10 @@ BASE_DATA_DIR = "../../data/time_series/1"  # Example, adjust if needed
 VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")  # <<< SET THIS (TestData Source)
 
 # Model & Task Parameters (from latest training script)
-SEQ_LEN = 64 # Default, will be overridden by preprocessor if available
-PRED_HORIZONS = [1, 3, 5] # Default, will be overridden by preprocessor if available
-FAIL_HORIZONS = [3, 5, 10] # Default, will be overridden by preprocessor if available
-RCA_FAILURE_LOOKAHEAD = FAIL_HORIZONS[0] # Default, will be overridden by preprocessor if available
+SEQ_LEN = 64  # Default, will be overridden by preprocessor if available
+PRED_HORIZONS = [1, 3, 5]  # Default, will be overridden by preprocessor if available
+FAIL_HORIZONS = [3, 5, 10]  # Default, will be overridden by preprocessor if available
+RCA_FAILURE_LOOKAHEAD = FAIL_HORIZONS[0]  # Default, will be overridden by preprocessor if available
 # MAX_SENSORS_CAP will be loaded from preprocessor as model_max_sensors_dim
 
 # Architectural Params (ensure these match the trained model's config)
@@ -43,9 +44,9 @@ AUX_LOSS_COEFF = 0.01  # Not used for loss calculation in test
 ENTROPY_REG_COEFF = 0.01  # Not used for loss calculation in test
 
 # Testing Params
-TEST_BATCH_SIZE = 4 # Reduced for potentially more detailed per-batch inspection
+TEST_BATCH_SIZE = 4  # Reduced for potentially more detailed per-batch inspection
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_BATCHES_TO_TEST = 5 # Limit for quick testing; set to float('inf') or large number for full test
+MAX_BATCHES_TO_TEST = 5  # Limit for quick testing; set to float('inf') or large number for full test
 SAMPLES_PER_BATCH_TO_PRINT = 2
 
 # --- Paths (Updated to match EMA training script output) ---
@@ -204,8 +205,8 @@ class TestMultivariateTimeSeriesDataset(Dataset):
             if "CURRENT_FAILURE" in df.columns:
                 failure_flags = df["CURRENT_FAILURE"].values.astype(np.int64)
             else:
-                print(f"Warning: 'CURRENT_FAILURE' column not found in {fp}. Fail/RCA targets will be zero for this file.")
-
+                print(
+                    f"Warning: 'CURRENT_FAILURE' column not found in {fp}. Fail/RCA targets will be zero for this file.")
 
             self.data_cache.append({
                 "raw_features_globally_aligned": raw_features_from_canonical_cols,
@@ -215,8 +216,9 @@ class TestMultivariateTimeSeriesDataset(Dataset):
             })
             max_lookahead = max(max(self.pred_horizons), max(self.fail_horizons), self.rca_failure_lookahead)
             for i in range(len(df) - self.seq_len - max_lookahead + 1):
-                 self.window_indices.append((file_idx, i))
-        if not self.data_cache: print(f"CRITICAL WARNING: No test data loaded from {self.data_dir}. Check paths and file contents."); return
+                self.window_indices.append((file_idx, i))
+        if not self.data_cache: print(
+            f"CRITICAL WARNING: No test data loaded from {self.data_dir}. Check paths and file contents."); return
         print(f"Loaded {len(self.data_cache)} test files, created {len(self.window_indices)} windows.")
 
     def __len__(self):
@@ -230,7 +232,6 @@ class TestMultivariateTimeSeriesDataset(Dataset):
         flags_full = item_data["failure_flags"]
         filepath = item_data["filepath"]
 
-
         input_slice_normed = features_normalized_aligned[window_start_idx: window_start_idx + self.seq_len]
         padded_input_normed = np.zeros((self.seq_len, self.model_max_sensors_dim), dtype=np.float32)
         sensor_mask = np.zeros(self.model_max_sensors_dim, dtype=np.float32)
@@ -243,7 +244,6 @@ class TestMultivariateTimeSeriesDataset(Dataset):
         padded_input_normed[np.isnan(padded_input_normed)] = 0.0
         last_known_normed = padded_input_normed[-1, :].copy()
 
-
         delta_targets_normed = np.zeros((self.model_max_sensors_dim, len(self.pred_horizons)), dtype=np.float32)
         for i_h, h in enumerate(self.pred_horizons):
             target_idx = window_start_idx + self.seq_len + h - 1
@@ -251,7 +251,8 @@ class TestMultivariateTimeSeriesDataset(Dataset):
                 target_values_all_normed = features_normalized_aligned[target_idx, :]
                 for k_idx_sensor in range(num_to_copy):
                     if sensor_mask[k_idx_sensor] > 0 and not np.isnan(target_values_all_normed[k_idx_sensor]):
-                        delta_targets_normed[k_idx_sensor, i_h] = target_values_all_normed[k_idx_sensor] - last_known_normed[k_idx_sensor]
+                        delta_targets_normed[k_idx_sensor, i_h] = target_values_all_normed[k_idx_sensor] - \
+                                                                  last_known_normed[k_idx_sensor]
 
         fail_targets = np.zeros(len(self.fail_horizons), dtype=np.float32)
         for i_fh, fh in enumerate(self.fail_horizons):
@@ -262,7 +263,7 @@ class TestMultivariateTimeSeriesDataset(Dataset):
         rca_targets = np.zeros(self.model_max_sensors_dim, dtype=np.float32)
         start_r, end_r = window_start_idx + self.seq_len, window_start_idx + self.seq_len + self.rca_failure_lookahead
         if end_r <= len(flags_full) and np.any(flags_full[start_r:end_r]):
-            current_window_raw = raw_features_aligned[window_start_idx : window_start_idx + self.seq_len, :]
+            current_window_raw = raw_features_aligned[window_start_idx: window_start_idx + self.seq_len, :]
             future_lookahead_raw = raw_features_aligned[start_r:end_r, :]
             for k_idx_sensor in range(num_to_copy):
                 if sensor_mask[k_idx_sensor] > 0:
@@ -283,10 +284,10 @@ class TestMultivariateTimeSeriesDataset(Dataset):
         return {"input_features": torch.from_numpy(padded_input_normed), "sensor_mask": torch.from_numpy(sensor_mask),
                 "last_known_values_globally_std": torch.from_numpy(last_known_normed),
                 "pred_delta_targets_globally_std": torch.from_numpy(delta_targets_normed),
-                "fail_targets": torch.from_numpy(fail_targets),
+                "fail_targets": torch.from_numpy(fail_targets),  # This is GT_FAILURE
                 "rca_targets": torch.from_numpy(rca_targets),
                 "filepath": filepath, "window_start_idx": window_start_idx
-               }
+                }
 
 
 # --- Foundational Multi-Task Model (from latest training script) ---
@@ -376,7 +377,8 @@ class FoundationalTimeSeriesModel(nn.Module):
                                                                   SENSOR_INPUT_DIM)
 
         sensor_temporal_features_flat = self.per_sensor_encoder(x_reshaped_for_encoder)
-        sensor_temporal_features = sensor_temporal_features_flat.reshape(batch_size, self.model_max_sensors, seq_len_dim,
+        sensor_temporal_features = sensor_temporal_features_flat.reshape(batch_size, self.model_max_sensors,
+                                                                         seq_len_dim,
                                                                          self.sensor_tcn_out_dim)
         sensor_temporal_features = sensor_temporal_features * sensor_mask.view(batch_size, self.model_max_sensors, 1, 1)
 
@@ -412,7 +414,7 @@ class FoundationalTimeSeriesModel(nn.Module):
         moe_rca_output_flat = torch.zeros(batch_size * self.model_max_sensors, self.moe_output_dim,
                                           device=x_features_globally_std.device, dtype=moe_forecast_output.dtype)
         aux_rca = torch.tensor(0.0, device=x_features_globally_std.device)
-        logits_rca_valid = None # Not used for entropy loss calculation in eval
+        logits_rca_valid = None  # Not used for entropy loss calculation in eval
 
         if x_flat_rca_expert_input_valid.size(0) > 0:
             x_flat_rca_gate_input_valid = x_flat_rca_expert_input_valid
@@ -423,8 +425,9 @@ class FoundationalTimeSeriesModel(nn.Module):
             moe_rca_output_flat[valid_token_mask_rca] = moe_rca_output_flat_valid
             aux_rca = aux_rca_valid
 
-        total_aux_loss = self.aux_loss_coeff * (aux_f + aux_fail + aux_rca) # Calculated, but typically not the primary eval metric
-        total_entropy_loss = torch.tensor(0.0, device=x_features_globally_std.device) # Not calculated in eval
+        total_aux_loss = self.aux_loss_coeff * (
+                    aux_f + aux_fail + aux_rca)  # Calculated, but typically not the primary eval metric
+        total_entropy_loss = torch.tensor(0.0, device=x_features_globally_std.device)  # Not calculated in eval
 
         tcn_features_last_step = sensor_temporal_features[:, :, -1, :]
         moe_f_expanded = moe_forecast_output.unsqueeze(1).expand(-1, self.model_max_sensors, -1)
@@ -460,30 +463,37 @@ def test_model():
         canonical_sensor_names = list(preprocessor_data['canonical_sensor_names'])
         model_max_sensors_dim = int(preprocessor_data['model_max_sensors_dim'])
         loaded_seq_len = int(preprocessor_data.get('seq_len', SEQ_LEN))
-        loaded_pred_horizons = list(preprocessor_data.get('pred_horizons', np.array(PRED_HORIZONS))) # Ensure list
-        loaded_fail_horizons = list(preprocessor_data.get('fail_horizons', np.array(FAIL_HORIZONS))) # Ensure list
+        loaded_pred_horizons = list(preprocessor_data.get('pred_horizons', np.array(PRED_HORIZONS)))  # Ensure list
+        loaded_fail_horizons = list(preprocessor_data.get('fail_horizons', np.array(FAIL_HORIZONS)))  # Ensure list
         loaded_rca_lookahead = int(preprocessor_data.get('rca_failure_lookahead', RCA_FAILURE_LOOKAHEAD))
 
         if loaded_seq_len != SEQ_LEN:
-            print(f"Info: SEQ_LEN loaded from preprocessor: {loaded_seq_len} (Script default was: {SEQ_LEN}). Using loaded value.")
-        if not np.array_equal(np.array(loaded_pred_horizons), np.array(PRED_HORIZONS)): # Compare as arrays for safety
-            print(f"Info: PRED_HORIZONS loaded: {loaded_pred_horizons} (Script default was: {PRED_HORIZONS}). Using loaded value.")
+            print(
+                f"Info: SEQ_LEN loaded from preprocessor: {loaded_seq_len} (Script default was: {SEQ_LEN}). Using loaded value.")
+        if not np.array_equal(np.array(loaded_pred_horizons), np.array(PRED_HORIZONS)):  # Compare as arrays for safety
+            print(
+                f"Info: PRED_HORIZONS loaded: {loaded_pred_horizons} (Script default was: {PRED_HORIZONS}). Using loaded value.")
         if not np.array_equal(np.array(loaded_fail_horizons), np.array(FAIL_HORIZONS)):
-             print(f"Info: FAIL_HORIZONS loaded: {loaded_fail_horizons} (Script default was: {FAIL_HORIZONS}). Using loaded value.")
+            print(
+                f"Info: FAIL_HORIZONS loaded: {loaded_fail_horizons} (Script default was: {FAIL_HORIZONS}). Using loaded value.")
         if loaded_rca_lookahead != RCA_FAILURE_LOOKAHEAD:
-            print(f"Info: RCA_LOOKAHEAD loaded: {loaded_rca_lookahead} (Script default was: {RCA_FAILURE_LOOKAHEAD}). Using loaded value.")
+            print(
+                f"Info: RCA_LOOKAHEAD loaded: {loaded_rca_lookahead} (Script default was: {RCA_FAILURE_LOOKAHEAD}). Using loaded value.")
 
 
     except FileNotFoundError:
-        print(f"ERROR: Preprocessor file not found at {PREPROCESSOR_LOAD_PATH}. Please ensure the path is correct. Exiting.")
+        print(
+            f"ERROR: Preprocessor file not found at {PREPROCESSOR_LOAD_PATH}. Please ensure the path is correct. Exiting.")
         return
     except KeyError as e:
-        print(f"ERROR: Missing key {e} in preprocessor file. The preprocessor file might be from an older version or corrupted. Exiting.")
+        print(
+            f"ERROR: Missing key {e} in preprocessor file. The preprocessor file might be from an older version or corrupted. Exiting.")
         return
 
-    print(f"Preprocessor loaded successfully: model_max_sensors_dim={model_max_sensors_dim}, {len(canonical_sensor_names)} canonical sensors.")
-    print(f"Using SeqLen={loaded_seq_len}, PredHorizons={loaded_pred_horizons}, FailHorizons={loaded_fail_horizons}, RCALookahead={loaded_rca_lookahead}")
-
+    print(
+        f"Preprocessor loaded successfully: model_max_sensors_dim={model_max_sensors_dim}, {len(canonical_sensor_names)} canonical sensors.")
+    print(
+        f"Using SeqLen={loaded_seq_len}, PredHorizons={loaded_pred_horizons}, FailHorizons={loaded_fail_horizons}, RCALookahead={loaded_rca_lookahead}")
 
     # 2. Initialize Dataset and DataLoader
     if not (os.path.exists(VALID_DIR) and os.path.isdir(VALID_DIR)):
@@ -504,7 +514,75 @@ def test_model():
     if len(test_dataset) == 0:
         print(f"ERROR: No data found or no valid windows created in the test dataset from {VALID_DIR}. Exiting.")
         return
-    test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=False,
+                             num_workers=0)  # shuffle=False to make collection deterministic before our own shuffle
+
+    # --- MODIFICATION START: Collect and filter batches ---
+    print("Collecting and classifying batches...")
+    failure_batches = []
+    non_failure_batches = []
+    for batch_content in test_loader:
+        # A batch is a "failure batch" if any sample in it has any failure flag set (fail_targets == 1.0) for any horizon
+        if torch.any(batch_content["fail_targets"] == 1.0):
+            failure_batches.append(batch_content)
+        else:
+            non_failure_batches.append(batch_content)
+
+    print(f"Collected {len(failure_batches)} failure batches and {len(non_failure_batches)} non-failure batches.")
+
+    # Shuffle the collected batches to ensure variety if we're subsampling
+    random.shuffle(failure_batches)
+    random.shuffle(non_failure_batches)
+
+    num_total_available_batches = len(failure_batches) + len(non_failure_batches)
+    if MAX_BATCHES_TO_TEST is None or MAX_BATCHES_TO_TEST == float('inf'):
+        num_to_pick_overall = num_total_available_batches
+    else:
+        num_to_pick_overall = min(MAX_BATCHES_TO_TEST, num_total_available_batches)
+
+    print(
+        f"Will pick {num_to_pick_overall} batches in total for testing based on MAX_BATCHES_TO_TEST={MAX_BATCHES_TO_TEST}.")
+
+    final_batches_to_process = []
+
+    # Determine how many failure batches we aim for
+    target_failure_count = math.ceil(num_to_pick_overall / 2.0)
+
+    # Take failure batches, up to the target count or available
+    actual_failures_taken = failure_batches[:min(int(target_failure_count), len(failure_batches))]
+    final_batches_to_process.extend(actual_failures_taken)
+
+    # Determine remaining slots and fill with non-failure batches
+    remaining_slots = num_to_pick_overall - len(final_batches_to_process)
+    actual_non_failures_taken = non_failure_batches[:min(remaining_slots, len(non_failure_batches))]
+    final_batches_to_process.extend(actual_non_failures_taken)
+
+    # If we still haven't picked num_to_pick_overall (e.g., ran out of non-failure batches),
+    # fill remaining slots with more failure batches if available.
+    if len(final_batches_to_process) < num_to_pick_overall:
+        failures_already_taken_count = len(actual_failures_taken)
+        additional_needed_to_fill_total = num_to_pick_overall - len(final_batches_to_process)
+
+        # Available additional failures are those not in actual_failures_taken
+        more_failures_available = len(failure_batches) - failures_already_taken_count
+
+        num_more_failures_to_take = min(additional_needed_to_fill_total, more_failures_available)
+
+        if num_more_failures_to_take > 0:
+            final_batches_to_process.extend(
+                failure_batches[failures_already_taken_count: failures_already_taken_count + num_more_failures_to_take])
+
+    random.shuffle(final_batches_to_process)  # Shuffle the final list of batches
+
+    num_failure_in_final = sum(1 for b in final_batches_to_process if torch.any(b["fail_targets"] == 1.0))
+    if len(final_batches_to_process) > 0:
+        failure_ratio = num_failure_in_final / len(final_batches_to_process)
+        print(
+            f"Processing {len(final_batches_to_process)} batches: {num_failure_in_final} with failures, {len(final_batches_to_process) - num_failure_in_final} without failures. (Failure ratio: {failure_ratio:.2f})")
+    else:
+        print("No batches selected for processing. Check MAX_BATCHES_TO_TEST and data availability.")
+        return
+    # --- MODIFICATION END ---
 
     # 3. Initialize Model
     model = FoundationalTimeSeriesModel(
@@ -535,10 +613,12 @@ def test_model():
     try:
         model.load_state_dict(torch.load(MODEL_LOAD_PATH, map_location=DEVICE))
     except FileNotFoundError:
-        print(f"ERROR: Model file not found at {MODEL_LOAD_PATH}. Ensure this path is correct and the model has been trained. Exiting.")
+        print(
+            f"ERROR: Model file not found at {MODEL_LOAD_PATH}. Ensure this path is correct and the model has been trained. Exiting.")
         return
     except RuntimeError as e:
-        print(f"ERROR loading model state_dict: {e}. This often means a mismatch between the model architecture defined in this script and the one that was saved. Double-check all architectural parameters. Exiting.")
+        print(
+            f"ERROR loading model state_dict: {e}. This often means a mismatch between the model architecture defined in this script and the one that was saved. Double-check all architectural parameters. Exiting.")
         return
     except Exception as e:
         print(f"An unexpected error occurred while loading the model: {e}. Exiting.")
@@ -549,17 +629,16 @@ def test_model():
 
     # 5. Perform Inference and Print Results
     with torch.no_grad():
-        for batch_idx, batch_content in enumerate(test_loader):
-            if MAX_BATCHES_TO_TEST is not None and batch_idx >= MAX_BATCHES_TO_TEST :
-                print(f"\nReached MAX_BATCHES_TO_TEST ({MAX_BATCHES_TO_TEST}). Stopping inference.")
-                break
-            print(f"\n--- Batch {batch_idx + 1}/{min(MAX_BATCHES_TO_TEST if MAX_BATCHES_TO_TEST is not None else len(test_loader), len(test_loader))} ---")
+        # Iterate over the curated list of batches
+        for batch_idx, batch_content in enumerate(final_batches_to_process):
+            # The MAX_BATCHES_TO_TEST limit is already handled by the length of final_batches_to_process
+            print(f"\n--- Batch {batch_idx + 1}/{len(final_batches_to_process)} ---")
 
             input_globally_std = batch_content["input_features"].to(DEVICE)
             sensor_m = batch_content["sensor_mask"].to(DEVICE)
             last_k_std_gt = batch_content["last_known_values_globally_std"].to(DEVICE)
             delta_tgt_std_gt = batch_content["pred_delta_targets_globally_std"].to(DEVICE)
-            fail_tgt_gt = batch_content["fail_targets"].to(DEVICE)
+            fail_tgt_gt = batch_content["fail_targets"].to(DEVICE)  # This is GT_FAILURE
             rca_tgt_gt = batch_content["rca_targets"].to(DEVICE)
 
             pred_abs_globally_std, fail_logits, rca_logits, _, _ = model(input_globally_std, sensor_m)
@@ -567,49 +646,65 @@ def test_model():
 
             num_samples_to_print_this_batch = min(SAMPLES_PER_BATCH_TO_PRINT, input_globally_std.size(0))
             for i in range(num_samples_to_print_this_batch):
-                sample_fp = batch_content["filepath"][i]
+                sample_fp = batch_content["filepath"][i]  # batch_content is a dict, filepath is a list/tuple of strings
                 sample_win_start = batch_content["window_start_idx"][i].item()
-                print(f"\n  Sample {i + 1} (File: {os.path.basename(sample_fp)}, Window Start Index: {sample_win_start})")
+                print(
+                    f"\n  Sample {i + 1} (File: {os.path.basename(sample_fp)}, Window Start Index: {sample_win_start})")
 
                 active_sensor_indices = torch.where(sensor_m[i] == 1.0)[0].cpu().tolist()
                 if not active_sensor_indices:
                     print("    No active sensors in this sample according to sensor_mask.")
                     continue
 
+                # Display if this sample contains a GT_FAILURE for any horizon
+                sample_has_gt_failure = torch.any(fail_tgt_gt[i] == 1.0).item()
+                print(f"    Sample GT_FAILURE (any horizon): {'YES' if sample_has_gt_failure else 'NO'}")
+
                 print("    Forecast Outputs (Globally Standardized Space):")
                 for h_idx, horizon_val in enumerate(loaded_pred_horizons):
                     print(f"      Horizon = {horizon_val} steps:")
-                    for s_local_idx, s_global_model_idx in enumerate(active_sensor_indices[:min(3, len(active_sensor_indices))]):
+                    for s_local_idx, s_global_model_idx in enumerate(active_sensor_indices[:min(3,
+                                                                                                len(active_sensor_indices))]):  # Print for first 3 active sensors
                         gt_val = actual_abs_targets_std[i, s_global_model_idx, h_idx].item()
                         pred_val = pred_abs_globally_std[i, s_global_model_idx, h_idx].item()
-                        sensor_name_display = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(canonical_sensor_names) else f"Sensor_Pad_{s_global_model_idx+1}"
-                        print(f"        {sensor_name_display} (GlobalIdx {s_global_model_idx}): GT_Abs_Std={gt_val:.3f}, Pred_Abs_Std={pred_val:.3f}")
+                        sensor_name_display = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(
+                            canonical_sensor_names) else f"Sensor_Pad_{s_global_model_idx + 1}"
+                        print(
+                            f"        {sensor_name_display} (GlobalIdx {s_global_model_idx}): GT_Abs_Std={gt_val:.3f}, Pred_Abs_Std={pred_val:.3f}")
 
                 print("    Failure Prediction Outputs:")
                 pred_fail_probs = torch.sigmoid(fail_logits[i]).cpu().tolist()
                 gt_fail_status = fail_tgt_gt[i].cpu().tolist()
                 for h_idx, horizon_val in enumerate(loaded_fail_horizons):
-                    print(f"      Failure within next {horizon_val} steps: GT={gt_fail_status[h_idx]:.0f}, Pred_Prob={pred_fail_probs[h_idx]:.3f} (Logit: {fail_logits[i, h_idx].item():.3f})")
+                    print(
+                        f"      Failure within next {horizon_val} steps: GT={gt_fail_status[h_idx]:.0f}, Pred_Prob={pred_fail_probs[h_idx]:.3f} (Logit: {fail_logits[i, h_idx].item():.3f})")
 
                 print(f"    RCA Prediction Outputs (for {loaded_rca_lookahead}-step horizon):")
                 rca_active_based_on_failure = False
                 try:
+                    # Check if the specific horizon for RCA has a GT failure or high predicted probability
                     rca_horizon_idx_in_fail_list = loaded_fail_horizons.index(loaded_rca_lookahead)
-                    if gt_fail_status[rca_horizon_idx_in_fail_list] == 1.0 or pred_fail_probs[rca_horizon_idx_in_fail_list] > 0.5 :
-                         rca_active_based_on_failure = True
+                    if gt_fail_status[rca_horizon_idx_in_fail_list] == 1.0 or pred_fail_probs[
+                        rca_horizon_idx_in_fail_list] > 0.5:
+                        rca_active_based_on_failure = True
                 except ValueError:
-                    print(f"      Warning: RCA_FAILURE_LOOKAHEAD ({loaded_rca_lookahead}) not in loaded FAIL_HORIZONS ({loaded_fail_horizons}). Cannot link RCA to a specific failure prediction horizon for display logic.")
-                    rca_active_based_on_failure = True
+                    print(
+                        f"      Warning: RCA_FAILURE_LOOKAHEAD ({loaded_rca_lookahead}) not in loaded FAIL_HORIZONS ({loaded_fail_horizons}). Cannot link RCA to a specific failure prediction horizon for display logic. Displaying RCA by default.")
+                    rca_active_based_on_failure = True  # Default to showing if not directly linkable
 
                 if rca_active_based_on_failure:
                     pred_rca_scores = torch.sigmoid(rca_logits[i]).cpu().tolist()
-                    for s_local_idx, s_global_model_idx in enumerate(active_sensor_indices[:min(5, len(active_sensor_indices))]):
-                        sensor_name_display = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(canonical_sensor_names) else f"Sensor_Pad_{s_global_model_idx+1}"
+                    for s_local_idx, s_global_model_idx in enumerate(active_sensor_indices[:min(5,
+                                                                                                len(active_sensor_indices))]):  # Print for first 5 active sensors
+                        sensor_name_display = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(
+                            canonical_sensor_names) else f"Sensor_Pad_{s_global_model_idx + 1}"
                         score = pred_rca_scores[s_global_model_idx]
                         gt_rca_val = rca_tgt_gt[i, s_global_model_idx].item()
-                        print(f"        {sensor_name_display} (GlobalIdx {s_global_model_idx}): Pred_RCA_Score={score:.3f} (Logit: {rca_logits[i,s_global_model_idx].item():.3f}), GT_RCA={gt_rca_val:.0f}")
+                        print(
+                            f"        {sensor_name_display} (GlobalIdx {s_global_model_idx}): Pred_RCA_Score={score:.3f} (Logit: {rca_logits[i, s_global_model_idx].item():.3f}), GT_RCA={gt_rca_val:.0f}")
                 else:
-                     print(f"      RCA predictions not displayed for this sample as the failure condition for the {loaded_rca_lookahead}-step horizon was not met (GT failure=0 and Pred_Prob<=0.5).")
+                    print(
+                        f"      RCA predictions not displayed for this sample as the failure condition for the {loaded_rca_lookahead}-step horizon was not met (GT failure=0 and Pred_Prob<=0.5).")
 
     print("\n--- Testing Script Finished ---")
 
@@ -618,6 +713,7 @@ if __name__ == '__main__':
     if BASE_DATA_DIR == "../../data/time_series/1":
         print("\nWARNING: Using default example BASE_DATA_DIR. Ensure VALID_DIR points to your actual test data.\n")
     if not os.path.exists(MODEL_LOAD_PATH) or not os.path.exists(PREPROCESSOR_LOAD_PATH):
-        print(f"WARNING: Model ({MODEL_LOAD_PATH}) or Preprocessor ({PREPROCESSOR_LOAD_PATH}) not found. Please check paths.\n")
+        print(
+            f"WARNING: Model ({MODEL_LOAD_PATH}) or Preprocessor ({PREPROCESSOR_LOAD_PATH}) not found. Please check paths.\n")
 
     test_model()
