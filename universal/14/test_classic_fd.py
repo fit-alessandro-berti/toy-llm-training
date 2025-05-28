@@ -7,7 +7,7 @@ import warnings
 import traceback
 
 # --- Configuration ---
-BASE_DATA_DIR = "../../data/time_series/1"
+BASE_DATA_DIR = "../../data/time_series/2"
 VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")
 PREPROCESSOR_LOAD_PATH = "foundation_multitask_preprocessor_v3_ema_updated.npz"
 OUTPUT_CSV_CLASSIC_FAILURE_FILENAME = "output_failure_prediction_classic.csv"
