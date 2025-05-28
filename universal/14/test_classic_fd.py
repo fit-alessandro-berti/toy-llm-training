@@ -2,7 +2,8 @@ import os
 import glob
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier  # Classifier version
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.multioutput import MultiOutputClassifier  # <<< ADD THIS IMPORT
 import warnings
 import traceback
 
@@ -13,28 +14,21 @@ PREPROCESSOR_LOAD_PATH = "foundation_multitask_preprocessor_v3_ema_updated.npz"
 OUTPUT_CSV_CLASSIC_FAILURE_FILENAME = "output_failure_prediction_classic.csv"
 
 DEFAULT_SEQ_LEN = 64
-DEFAULT_FAIL_HORIZONS = [3, 5, 10]  # Horizons for failure prediction
+DEFAULT_FAIL_HORIZONS = [3, 5, 10]
 
-HGBCLASS_PARAMS = {  # Parameters for HistGradientBoostingClassifier
+HGBCLASS_PARAMS = {
     "max_iter": 100,
     "learning_rate": 0.1,
     "max_depth": 7,
     "l2_regularization": 0.1,
     "random_state": 42,
-    # Loss defaults to 'log_loss' which is appropriate for binary/multiclass
 }
-MIN_SAMPLES_FOR_TRAINING = 100  # Min windows to train the global failure model
+MIN_SAMPLES_FOR_TRAINING = 100
 
 
 def create_failure_prediction_windows(df, seq_len, fail_horizons,
                                       canonical_sensor_names, global_means, global_stds,
                                       filepath_basename):
-    """
-    Creates input features (X) and multi-horizon failure targets (Y) from a DataFrame.
-    X: Normalized, flattened sensor data for seq_len.
-    Y: Binary indicators for failure within each horizon.
-    Returns X, Y, and a list of window_info dicts for traceability.
-    """
     X_all_windows = []
     Y_all_horizons = []
     window_info_list = []
@@ -42,18 +36,14 @@ def create_failure_prediction_windows(df, seq_len, fail_horizons,
     num_canonical_sensors = len(canonical_sensor_names)
     feature_vector_len = num_canonical_sensors * seq_len
 
-    # Ensure 'CURRENT_FAILURE' column exists
     if 'CURRENT_FAILURE' not in df.columns:
-        print(
-            f"Warning: 'CURRENT_FAILURE' column missing in {filepath_basename}. Cannot generate failure targets for this file.")
+        # print(f"Warning: 'CURRENT_FAILURE' column missing in {filepath_basename}. Skipping file for failure data.") # Less verbose
         return np.array(X_all_windows).reshape(0, feature_vector_len), \
-            np.array(Y_all_horizons).reshape(0, len(fail_horizons)), \
+            np.array(Y_all_horizons).reshape(0, len(fail_horizons) if fail_horizons else 0), \
             window_info_list
 
     failure_flags_series = df['CURRENT_FAILURE'].to_numpy()
-
-    # Pre-normalize all relevant sensor columns
-    normalized_sensor_data = np.full((len(df), num_canonical_sensors), np.nan)  # Initialize with NaN
+    normalized_sensor_data = np.full((len(df), num_canonical_sensors), 0.0)  # Initialize with 0.0 (mean for normalized)
 
     for s_idx, s_name in enumerate(canonical_sensor_names):
         if s_name in df.columns:
@@ -62,45 +52,36 @@ def create_failure_prediction_windows(df, seq_len, fail_horizons,
             std = global_stds[s_idx]
             if std >= 1e-8:
                 normalized_sensor_data[:, s_idx] = (series_raw - mean) / std
-            else:  # If std is near zero, normalized data is 0 (if mean was subtracted) or raw (if not)
-                normalized_sensor_data[:, s_idx] = 0.0  # Represent as mean (0 after std normalization)
+            # else: it remains 0.0 as initialized
 
-    # Fill any remaining NaNs in normalized_sensor_data (e.g. sensors not in file) with 0
-    # This means they are at their 'global mean' for the feature vector
+    # NaNs from sensors not present in CSV but in canonical list, or from original NaNs in present sensors,
+    # will become 0.0 due to np.nan_to_num or if std was ~0. HGB can handle NaNs if they were preserved.
+    # For simplicity here, they become 0.0.
     normalized_sensor_data = np.nan_to_num(normalized_sensor_data, nan=0.0)
 
     max_horizon = 0
     if fail_horizons:
         max_horizon = max(fail_horizons)
-    else:  # Should be caught by earlier checks
+    else:
         return np.array(X_all_windows).reshape(0, feature_vector_len), \
             np.array(Y_all_horizons).reshape(0, 0), \
             window_info_list
 
     for i in range(len(df) - seq_len - max_horizon + 1):
-        # Create feature vector X for the window
-        # Slices from normalized_sensor_data which has shape (len(df), num_canonical_sensors)
-        # We want a slice of shape (seq_len, num_canonical_sensors) then flatten
         window_sensor_data = normalized_sensor_data[i: i + seq_len, :]
-        feature_vector = window_sensor_data.flatten()  # Shape: (seq_len * num_canonical_sensors)
+        feature_vector = window_sensor_data.flatten()
         X_all_windows.append(feature_vector)
 
-        # Create target vector Y for failure horizons
         targets_for_window = []
         for fh in fail_horizons:
-            # Check for failure in interval [i + seq_len, i + seq_len + fh -1] (inclusive indices)
-            # This corresponds to (t, t + fh] where t is the end of the input window
             start_idx_target = i + seq_len
-            end_idx_target = i + seq_len + fh  # Exclusive end for slicing: [start, end)
+            end_idx_target = i + seq_len + fh
 
-            # Ensure target window is within bounds of failure_flags_series
-            if end_idx_target > len(failure_flags_series):
-                # This window cannot have its full targets defined, skip (loop range should prevent this for y)
-                # This case should be rare if loop range is correct: len(df) - seq_len - max_horizon + 1
-                # This means we might not be able to form a full target vector.
-                # For simplicity in this function, we assume the loop range correctly handles this.
-                # If an error occurs, it suggests an off-by-one in loop range or max_horizon.
-                pass  # This target cannot be formed
+            if end_idx_target > len(failure_flags_series):  # Ensure slice is within bounds
+                # This should ideally not be hit if outer loop range is correct based on max_horizon
+                targets_for_window.append(0)  # Or handle as error/skip window
+                # print(f"Warning: Target window out of bounds for file {filepath_basename}, window_start {i}, horizon {fh}")
+                continue  # This will lead to fewer targets than fail_horizons for this sample, might need robust handling or ensure loop is correct
 
             target_window_failure_flags = failure_flags_series[start_idx_target:end_idx_target]
 
@@ -108,14 +89,18 @@ def create_failure_prediction_windows(df, seq_len, fail_horizons,
                 targets_for_window.append(1)
             else:
                 targets_for_window.append(0)
-        Y_all_horizons.append(targets_for_window)
 
-        window_info_list.append({
-            'filepath': filepath_basename,
-            'window_start_idx': i
-        })
+        # Ensure targets_for_window has the correct number of elements
+        if len(targets_for_window) == len(fail_horizons):
+            Y_all_horizons.append(targets_for_window)
+            window_info_list.append({
+                'filepath': filepath_basename,
+                'window_start_idx': i
+            })
+        else:  # If not all targets could be formed, discard this X window too
+            X_all_windows.pop()
 
-    if not X_all_windows:  # If list is empty
+    if not X_all_windows:
         return np.array(X_all_windows).reshape(0, feature_vector_len), \
             np.array(Y_all_horizons).reshape(0, len(fail_horizons) if fail_horizons else 0), \
             window_info_list
@@ -141,13 +126,9 @@ def test_classical_failure_prediction():
             canonical_sensor_names = list(map(str, list(canonical_sensor_names_obj)))
 
         SEQ_LEN = int(preprocessor_data.get('seq_len', DEFAULT_SEQ_LEN))
-        # Load FAIL_HORIZONS, not PRED_HORIZONS for this script's primary task
         fail_horizons_np = preprocessor_data.get('fail_horizons', np.array(DEFAULT_FAIL_HORIZONS))
         FAIL_HORIZONS = list(map(int, fail_horizons_np)) if isinstance(fail_horizons_np,
                                                                        np.ndarray) else DEFAULT_FAIL_HORIZONS
-
-        # model_max_sensors_dim = int(preprocessor_data.get('model_max_sensors_dim', len(canonical_sensor_names)))
-        # num_features = model_max_sensors_dim * SEQ_LEN
 
         print(f"Using SEQ_LEN={SEQ_LEN}, FAIL_HORIZONS={FAIL_HORIZONS}")
         print(f"Found {len(canonical_sensor_names)} canonical sensors.")
@@ -182,7 +163,8 @@ def test_classical_failure_prediction():
             df, SEQ_LEN, FAIL_HORIZONS, canonical_sensor_names, global_means, global_stds, os.path.basename(filepath)
         )
 
-        if X_file.size > 0 and Y_file.size > 0:
+        if X_file.size > 0 and Y_file.size > 0 and X_file.shape[0] == Y_file.shape[
+            0]:  # Ensure X and Y have same num samples
             all_X_for_training_list.append(X_file)
             all_Y_for_training_list.append(Y_file)
 
@@ -207,22 +189,27 @@ def test_classical_failure_prediction():
         return
 
     print(f"\nStep 2: Training a global failure prediction model...")
-    print(f"  Training with X_shape: {X_train_global.shape}, Y_shape: {Y_train_global.shape}")
+    print(
+        f"  Training with X_shape: {X_train_global.shape}, Y_shape: {Y_train_global.shape} (dtype: {Y_train_global.dtype})")
 
-    model = HistGradientBoostingClassifier(**HGBCLASS_PARAMS)
+    # --- MODIFICATION: Use MultiOutputClassifier ---
+    base_classifier = HistGradientBoostingClassifier(**HGBCLASS_PARAMS)
+    model_to_fit = MultiOutputClassifier(base_classifier,
+                                         n_jobs=-1)  # n_jobs=-1 for parallel training if multiple targets
+    # --- END MODIFICATION ---
+
     trained_model = None
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # HistGradientBoostingClassifier supports multi-output Y if it's 2D (n_samples, n_outputs)
-            # It will fit one estimator per output.
-            model.fit(X_train_global, Y_train_global)
-        trained_model = model
+            print(f"  Fitting with model type: {type(model_to_fit)}")  # Confirm wrapper is used
+            model_to_fit.fit(X_train_global, Y_train_global)  # Y_train_global is (n_samples, n_outputs)
+        trained_model = model_to_fit
         print(f"  Successfully trained global failure prediction model.")
     except Exception as e:
         print(f"    ERROR training global failure prediction model: {e}")
-        traceback.print_exc()
-        return  # Cannot proceed without a model
+        traceback.print_exc()  # Print full traceback
+        return
 
     print("\nStep 3: Generating failure predictions and preparing output CSV...")
     output_data_list = []
@@ -234,32 +221,35 @@ def test_classical_failure_prediction():
             print(f"    Warning: Could not read file {filepath} for prediction: {e}. Skipping.")
             continue
 
-        # Get X, ground truth Y, and window_info for the current file
         X_file_pred, Y_file_gt, window_info_file = create_failure_prediction_windows(
             df_current_file, SEQ_LEN, FAIL_HORIZONS, canonical_sensor_names,
             global_means, global_stds, os.path.basename(filepath)
         )
 
-        if X_file_pred.size == 0 or Y_file_gt.size == 0:  # No windows to predict for this file
+        if X_file_pred.size == 0 or Y_file_gt.size == 0 or X_file_pred.shape[0] != Y_file_gt.shape[0]:
             continue
 
-        # Predict labels and probabilities
-        predicted_labels_batch = trained_model.predict(X_file_pred)  # Shape: (n_windows, n_fail_horizons)
-
-        # predict_proba returns a list of arrays for multi-output: one per output/horizon
-        # Each array is (n_samples, n_classes=2 for binary)
+        predicted_labels_batch = trained_model.predict(X_file_pred)
         predicted_probas_list_of_arrays = trained_model.predict_proba(X_file_pred)
 
-        for i in range(X_file_pred.shape[0]):  # For each window in the file
+        for i in range(X_file_pred.shape[0]):
             window_info = window_info_file[i]
 
             for fh_idx, failure_horizon_val in enumerate(FAIL_HORIZONS):
                 gt_label = int(Y_file_gt[i, fh_idx])
                 pred_label = int(predicted_labels_batch[i, fh_idx])
 
-                # Probability of class '1' (failure) for the fh_idx-th horizon
-                # The i-th sample, for the fh_idx-th output, probability of class 1
-                pred_proba_class1 = float(predicted_probas_list_of_arrays[fh_idx][i, 1])
+                # predicted_probas_list_of_arrays is a list of (n_samples, n_classes=2) arrays
+                # We need the probability for class '1' for the fh_idx-th output (horizon)
+                try:
+                    pred_proba_class1 = float(predicted_probas_list_of_arrays[fh_idx][i, 1])
+                except IndexError:
+                    print(f"IndexError accessing predicted_probas_list_of_arrays.")
+                    print(f"fh_idx: {fh_idx}, len(list): {len(predicted_probas_list_of_arrays)}")
+                    if fh_idx < len(predicted_probas_list_of_arrays):
+                        print(
+                            f"Shape of proba array at fh_idx: {predicted_probas_list_of_arrays[fh_idx].shape}, sample_idx i: {i}")
+                    pred_proba_class1 = 0.0  # Fallback, should not happen with correct MultiOutputClassifier usage
 
                 output_data_list.append({
                     'filepath': window_info['filepath'],
