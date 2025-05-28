@@ -11,7 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 
 # --- Configuration (MUST MATCH LATEST TRAINING SCRIPT) ---
 # Data paths
-BASE_DATA_DIR = "../../data/time_series/1"  # Example, adjust if needed
+BASE_DATA_DIR = "../../data/time_series/2"  # Example, adjust if needed
 VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")  # <<< SET THIS (TestData Source)
 OUTPUT_CSV_FILENAME = "output_forecast_fm.csv"  # <<< Name of the output CSV file
 
@@ -45,8 +45,8 @@ MOE_TOP_K = 2
 # Testing Params
 TEST_BATCH_SIZE = 4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_BATCHES_TO_TEST = 5  # Limit for quick testing; set to float('inf') or large number for full test
-SAMPLES_PER_BATCH_TO_PRINT = 2
+MAX_BATCHES_TO_TEST = float('inf')  # MODIFIED: Set to float('inf') to process all data
+SAMPLES_PER_BATCH_TO_PRINT = 2  # This only affects console output, not the CSV
 
 # --- Paths (Updated to match LATEST training script output) ---
 MODEL_LOAD_PATH = "foundation_multitask_model_v3_moe_vectorized_ema_cost_sensitive_updated.pth"
@@ -473,7 +473,7 @@ def test_model():
     print(f"Attempting to load model from: {MODEL_LOAD_PATH}")
     print(f"Attempting to load preprocessor from: {PREPROCESSOR_LOAD_PATH}")
 
-    output_forecast_data = []  # MODIFIED: Initialize list to store data for CSV
+    output_forecast_data = []  # Initialize list to store data for CSV
 
     # 1. Load Preprocessor Config
     try:
@@ -525,9 +525,37 @@ def test_model():
         print(f"ERROR: No data found or no valid windows created in the test dataset from {VALID_DIR}. Exiting.")
         return
 
-    print("Collecting and classifying batches...")
+    # MODIFIED: Batch Collection and Filtering Logic
+    # With MAX_BATCHES_TO_TEST = float('inf'), this will aim to process all batches.
+    print("Collecting all batches...")
+    # shuffle=False here makes processing order deterministic if desired, but not strictly necessary
+    # as output CSV contains identifiers. Original used shuffle=True for the temp_loader.
+    # For simplicity, let's create a loader we iterate through directly or use the existing logic
+    # which will end up using all batches if MAX_BATCHES_TO_TEST is inf.
+
+    # Original logic for batch selection:
+    # Create a DataLoader that can be iterated through.
+    # If shuffle=True, batches will be in random order. For "all rows", order doesn't prevent processing all.
+    # Using shuffle=False if a strict file-by-file, window-by-window order is important for debugging,
+    # but the CSV itself has identifiers. Let's keep it simple and stick to the spirit of original where
+    # the collected list was shuffled.
+
+    # The original script collected all batches then filtered.
+    # If MAX_BATCHES_TO_TEST is float('inf'), num_to_pick_overall becomes total number of batches.
+    # The complex selection logic below should then ensure all batches are included in final_batches_to_process.
+
     temp_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=True, num_workers=0)
     all_batches_from_loader = [batch_content for batch_content in temp_loader]
+
+    if not all_batches_from_loader:
+        print("No batches generated from the dataset. Exiting.")
+        return
+
+    print(f"Total batches to process: {len(all_batches_from_loader)}")
+
+    # The complex selection logic from the original script is kept.
+    # When MAX_BATCHES_TO_TEST = float('inf'), num_to_pick_overall will be len(all_batches_from_loader).
+    # The logic should then ensure final_batches_to_process contains all batches.
     random.shuffle(all_batches_from_loader)
 
     failure_batches = []
@@ -540,31 +568,41 @@ def test_model():
 
     print(
         f"Collected {len(failure_batches)} failure batches and {len(non_failure_batches)} non-failure batches from {len(all_batches_from_loader)} total batches.")
+
     num_to_pick_overall = min(MAX_BATCHES_TO_TEST, len(all_batches_from_loader)) if MAX_BATCHES_TO_TEST != float(
         'inf') else len(all_batches_from_loader)
+    # With MAX_BATCHES_TO_TEST = float('inf'), num_to_pick_overall will be len(all_batches_from_loader)
+
     print(
         f"Will pick up to {num_to_pick_overall} batches for testing based on MAX_BATCHES_TO_TEST={MAX_BATCHES_TO_TEST}.")
 
     final_batches_to_process = []
-    target_failure_count = math.ceil(num_to_pick_overall / 2.0)
-    actual_failures_taken = failure_batches[:min(int(target_failure_count), len(failure_batches))]
-    final_batches_to_process.extend(actual_failures_taken)
-    remaining_slots = num_to_pick_overall - len(final_batches_to_process)
-    if remaining_slots > 0:
-        actual_non_failures_taken = non_failure_batches[:min(remaining_slots, len(non_failure_batches))]
-        final_batches_to_process.extend(actual_non_failures_taken)
-    if len(final_batches_to_process) < num_to_pick_overall and len(final_batches_to_process) < len(
-            all_batches_from_loader):
-        additional_needed = num_to_pick_overall - len(final_batches_to_process)
-        remaining_failure_batches = [b for b in failure_batches if b not in actual_failures_taken]
-        can_take_more_failures = remaining_failure_batches[:min(additional_needed, len(remaining_failure_batches))]
-        final_batches_to_process.extend(can_take_more_failures)
-        additional_needed -= len(can_take_more_failures)
-        if additional_needed > 0:
-            remaining_non_failure_batches = [b for b in non_failure_batches if b not in actual_non_failures_taken]
-            can_take_more_non_failures = remaining_non_failure_batches[
-                                         :min(additional_needed, len(remaining_non_failure_batches))]
-            final_batches_to_process.extend(can_take_more_non_failures)
+    if num_to_pick_overall == len(all_batches_from_loader):  # If processing all, just use all batches
+        print("Processing all available batches.")
+        final_batches_to_process = all_batches_from_loader  # Order might be shuffled from above
+    else:  # This 'else' branch will not be hit if MAX_BATCHES_TO_TEST is inf. Kept for structural integrity.
+        target_failure_count = math.ceil(num_to_pick_overall / 2.0)
+        actual_failures_taken = failure_batches[:min(int(target_failure_count), len(failure_batches))]
+        final_batches_to_process.extend(actual_failures_taken)
+        remaining_slots = num_to_pick_overall - len(final_batches_to_process)
+        if remaining_slots > 0:
+            actual_non_failures_taken = non_failure_batches[:min(remaining_slots, len(non_failure_batches))]
+            final_batches_to_process.extend(actual_non_failures_taken)
+        if len(final_batches_to_process) < num_to_pick_overall and len(final_batches_to_process) < len(
+                all_batches_from_loader):
+            additional_needed = num_to_pick_overall - len(final_batches_to_process)
+            remaining_failure_batches = [b for b in failure_batches if b not in actual_failures_taken]
+            can_take_more_failures = remaining_failure_batches[:min(additional_needed, len(remaining_failure_batches))]
+            final_batches_to_process.extend(can_take_more_failures)
+            additional_needed -= len(can_take_more_failures)
+            if additional_needed > 0:
+                remaining_non_failure_batches = [b for b in non_failure_batches if b not in actual_non_failures_taken]
+                can_take_more_non_failures = remaining_non_failure_batches[
+                                             :min(additional_needed, len(remaining_non_failure_batches))]
+                final_batches_to_process.extend(can_take_more_non_failures)
+
+    # It's good to shuffle the final list if it was constructed piece-meal, though if it's all_batches_from_loader,
+    # it was already shuffled.
     random.shuffle(final_batches_to_process)
 
     num_failure_in_final = sum(1 for b in final_batches_to_process if torch.any(b["fail_targets"] == 1.0))
@@ -575,6 +613,7 @@ def test_model():
     else:
         print("No batches selected for processing. Check MAX_BATCHES_TO_TEST and data availability.")
         return
+    # --- End Batch Collection ---
 
     # 3. Initialize Model
     model = FoundationalTimeSeriesModel(
@@ -617,48 +656,49 @@ def test_model():
     # 5. Perform Inference and Collect/Print Results
     with torch.no_grad():
         for batch_idx, batch_content in enumerate(final_batches_to_process):
-            print(f"\n--- Batch {batch_idx + 1}/{len(final_batches_to_process)} ---")
+            if (batch_idx + 1) % 10 == 0 or batch_idx == 0:  # Print progress every 10 batches
+                print(f"\n--- Processing Batch {batch_idx + 1}/{len(final_batches_to_process)} ---")
 
             input_globally_std = batch_content["input_features"].to(DEVICE)
             sensor_m = batch_content["sensor_mask"].to(DEVICE)
             last_k_std_gt = batch_content["last_known_values_globally_std"].to(DEVICE)
             delta_tgt_std_gt = batch_content["pred_delta_targets_globally_std"].to(DEVICE)
-            fail_tgt_gt = batch_content["fail_targets"].to(DEVICE)
-            rca_tgt_gt = batch_content["rca_targets"].to(DEVICE)
+            fail_tgt_gt = batch_content["fail_targets"].to(DEVICE)  # For console print
+            rca_tgt_gt = batch_content["rca_targets"].to(DEVICE)  # For console print
 
             pred_abs_globally_std, fail_logits, rca_logits, _, _ = model(input_globally_std, sensor_m)
             actual_abs_targets_std = last_k_std_gt.unsqueeze(-1) + delta_tgt_std_gt  # [B, MaxSensors, PredHorizonsLen]
 
-            num_samples_to_print_this_batch = min(SAMPLES_PER_BATCH_TO_PRINT, input_globally_std.size(0))
-            for i in range(input_globally_std.size(0)):  # Iterate through all samples in batch for CSV
+            # Iterate through all samples in batch for CSV data collection
+            for i in range(input_globally_std.size(0)):
                 sample_fp = batch_content["filepath"][i]
                 sample_win_start = batch_content["window_start_idx"][i].item()
 
-                if i < num_samples_to_print_this_batch:  # Only print for specified number of samples
-                    print(f"\n  Sample {i + 1} (File: {os.path.basename(sample_fp)}, Window Start: {sample_win_start})")
+                # Console printing for a limited number of samples per batch
+                print_this_sample_to_console = (batch_idx * TEST_BATCH_SIZE + i) < SAMPLES_PER_BATCH_TO_PRINT
+
+                if print_this_sample_to_console:
+                    print(
+                        f"\n  Sample (Overall {batch_idx * TEST_BATCH_SIZE + i + 1}) (File: {os.path.basename(sample_fp)}, Window Start: {sample_win_start})")
 
                 active_sensor_indices_for_sample = torch.where(sensor_m[i] == 1.0)[0].cpu().tolist()
                 if not active_sensor_indices_for_sample:
-                    if i < num_samples_to_print_this_batch: print("    No active sensors for this sample.")
+                    if print_this_sample_to_console: print("    No active sensors for this sample.")
                     continue
 
-                if i < num_samples_to_print_this_batch:
+                if print_this_sample_to_console:
                     sample_has_gt_failure = torch.any(fail_tgt_gt[i] == 1.0).item()
                     print(f"    Sample GT_FAILURE (any horizon): {'YES' if sample_has_gt_failure else 'NO'}")
                     print("    Forecast Outputs (Globally Standardized - for print only):")
 
                 for h_idx, horizon_val in enumerate(loaded_pred_horizons):
-                    if i < num_samples_to_print_this_batch:
+                    if print_this_sample_to_console:
                         print(f"      Horizon = {horizon_val} steps:")
 
                     for s_global_model_idx in active_sensor_indices_for_sample:
-                        # De-normalize for CSV and for printing if it's a printed sample
                         mean_val = global_means[s_global_model_idx]
                         std_val = global_stds[s_global_model_idx]
-
-                        # Ensure std_val is not zero or too small to avoid division by zero or inf/nan issues later
-                        # This check is primarily for safety, as preprocessor should handle this.
-                        if std_val < 1e-8: std_val = 1.0  # Avoid issues with constant features
+                        if std_val < 1e-8: std_val = 1.0
 
                         gt_val_std = actual_abs_targets_std[i, s_global_model_idx, h_idx].item()
                         pred_val_std = pred_abs_globally_std[i, s_global_model_idx, h_idx].item()
@@ -670,7 +710,6 @@ def test_model():
                         sensor_name_str = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(
                             canonical_sensor_names) else f"SensorIDX_{s_global_model_idx}"
 
-                        # MODIFIED: Store data for CSV output
                         output_forecast_data.append({
                             'filepath': os.path.basename(sample_fp),
                             'window_start_idx': sample_win_start,
@@ -682,59 +721,60 @@ def test_model():
                             'difference_denormalized': difference_denorm
                         })
 
-                        if i < num_samples_to_print_this_batch and \
+                        if print_this_sample_to_console and \
                                 active_sensor_indices_for_sample.index(
                                     s_global_model_idx) < 3:  # Print only first 3 active sensors
                             print(
                                 f"        {sensor_name_str}: GT_Abs_Std={gt_val_std:.3f}, Pred_Abs_Std={pred_val_std:.3f} || Denorm: GT={gt_val_denorm:.3f}, Pred={pred_val_denorm:.3f}, Diff={difference_denorm:.3f}")
 
-                if i < num_samples_to_print_this_batch:
+                # Console printing for Failure and RCA (limited samples)
+                if print_this_sample_to_console:
                     print("    Failure Prediction Outputs:")
-                    pred_fail_probs = torch.sigmoid(fail_logits[i])
-                    gt_fail_sample = fail_tgt_gt[i].cpu().tolist()
+                    pred_fail_probs_sample_i = torch.sigmoid(fail_logits[i])
+                    gt_fail_sample_i = fail_tgt_gt[i].cpu().tolist()
                     state_hysteresis = torch.zeros(1, device=DEVICE)
-                    pred_fail_hysteresis_alarms = torch.zeros(len(loaded_fail_horizons), device=DEVICE)
-                    for h_idx, horizon_val in enumerate(loaded_fail_horizons):
-                        p_t_horizon = pred_fail_probs[h_idx]
+                    # pred_fail_hysteresis_alarms = torch.zeros(len(loaded_fail_horizons), device=DEVICE) # Already defined earlier
+                    for h_idx_fail, horizon_val_fail in enumerate(loaded_fail_horizons):
+                        p_t_horizon = pred_fail_probs_sample_i[h_idx_fail]
                         is_state_zero = (state_hysteresis == 0)
                         becomes_one = is_state_zero & (p_t_horizon > HYSTERESIS_HI_THRESH)
                         remains_one = (~is_state_zero) & (p_t_horizon > HYSTERESIS_LO_THRESH)
                         state_hysteresis = (becomes_one | remains_one).float()
-                        pred_fail_hysteresis_alarms[h_idx] = state_hysteresis.item()
+                        # pred_fail_hysteresis_alarms[h_idx_fail] = state_hysteresis.item() # Not used elsewhere, direct print
                         print(
-                            f"      Horizon {horizon_val}: GT={gt_fail_sample[h_idx]:.0f}, Pred_Prob={pred_fail_probs[h_idx].item():.3f}, Pred_Hyst_Alarm={pred_fail_hysteresis_alarms[h_idx].item():.0f} (Logit: {fail_logits[i, h_idx].item():.3f})")
+                            f"      Horizon {horizon_val_fail}: GT={gt_fail_sample_i[h_idx_fail]:.0f}, Pred_Prob={p_t_horizon.item():.3f}, Pred_Hyst_Alarm={state_hysteresis.item():.0f} (Logit: {fail_logits[i, h_idx_fail].item():.3f})")
 
                     print(f"    RCA Prediction Outputs (for {loaded_rca_lookahead}-step horizon):")
                     rca_display_active = False
                     try:
                         rca_horizon_idx_in_fail_list = loaded_fail_horizons.index(loaded_rca_lookahead)
-                        if gt_fail_sample[rca_horizon_idx_in_fail_list] == 1.0 or pred_fail_probs[
+                        if gt_fail_sample_i[rca_horizon_idx_in_fail_list] == 1.0 or pred_fail_probs_sample_i[
                             rca_horizon_idx_in_fail_list].item() > 0.5:
                             rca_display_active = True
                     except ValueError:
                         rca_display_active = True
 
                     if rca_display_active:
-                        pred_rca_scores_sample = torch.sigmoid(rca_logits[i]).cpu().tolist()
-                        gt_rca_sample = rca_tgt_gt[i].cpu().tolist()
+                        pred_rca_scores_sample_i = torch.sigmoid(rca_logits[i]).cpu().tolist()
+                        gt_rca_sample_i = rca_tgt_gt[i].cpu().tolist()
                         for s_local_idx, s_global_model_idx in enumerate(
                                 active_sensor_indices_for_sample[:min(5, len(active_sensor_indices_for_sample))]):
                             sensor_name = canonical_sensor_names[s_global_model_idx] if s_global_model_idx < len(
                                 canonical_sensor_names) else f"SensorIDX_{s_global_model_idx}"
-                            score = pred_rca_scores_sample[s_global_model_idx]
-                            gt_val = gt_rca_sample[s_global_model_idx]
+                            score = pred_rca_scores_sample_i[s_global_model_idx]
+                            gt_val = gt_rca_sample_i[s_global_model_idx]
                             print(
                                 f"        {sensor_name}: Pred_RCA_Score={score:.3f} (Logit: {rca_logits[i, s_global_model_idx].item():.3f}), GT_RCA={gt_val:.0f}")
                     else:
                         print(
                             f"      RCA predictions not displayed for this sample (failure condition at {loaded_rca_lookahead}-step horizon not met).")
 
-    # MODIFIED: Write collected forecast data to CSV
+    # Write collected forecast data to CSV
     if output_forecast_data:
         output_df = pd.DataFrame(output_forecast_data)
         try:
             output_df.to_csv(OUTPUT_CSV_FILENAME, index=False)
-            print(f"\nSuccessfully wrote forecast outputs to {OUTPUT_CSV_FILENAME}")
+            print(f"\nSuccessfully wrote {len(output_df)} forecast data points to {OUTPUT_CSV_FILENAME}")
         except Exception as e:
             print(f"\nERROR: Could not write forecast outputs to CSV: {e}")
     else:
@@ -744,9 +784,21 @@ def test_model():
 
 
 if __name__ == '__main__':
-    if BASE_DATA_DIR == "../../data/time_series/1":
-        print("\nWARNING: Using default example BASE_DATA_DIR. Ensure VALID_DIR points to your actual test data.\n")
+    if BASE_DATA_DIR == "../../data/time_series/1":  # Default check
+        # Check if the default path is actually intended or if user should change VALID_DIR
+        default_validation_path = os.path.join("../../data/time_series/1", "VALIDATION")
+        if VALID_DIR == default_validation_path:
+            print(f"\nWARNING: VALID_DIR is set to the default example path: {VALID_DIR}")
+            print("Ensure this points to your actual test data folder if this is not intended.\n")
+        elif BASE_DATA_DIR == "../../data/time_series/1" and not VALID_DIR.startswith(BASE_DATA_DIR):
+            # This case is less likely given how VALID_DIR is constructed, but good for completeness
+            print(f"\nINFO: BASE_DATA_DIR is default, but VALID_DIR is custom: {VALID_DIR}\n")
+
     if not os.path.exists(MODEL_LOAD_PATH) or not os.path.exists(PREPROCESSOR_LOAD_PATH):
         print(
-            f"WARNING: Model ({MODEL_LOAD_PATH}) or Preprocessor ({PREPROCESSOR_LOAD_PATH}) not found. Please check paths.\n")
+            f"CRITICAL WARNING: Model ({MODEL_LOAD_PATH}) or Preprocessor ({PREPROCESSOR_LOAD_PATH}) not found. Please check paths. Script will likely fail.\n")
+
+    if not os.path.exists(VALID_DIR) or not os.listdir(VALID_DIR):
+        print(f"CRITICAL WARNING: VALID_DIR '{VALID_DIR}' does not exist or is empty. No data to process.\n")
+
     test_model()
