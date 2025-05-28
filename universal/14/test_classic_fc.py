@@ -3,14 +3,14 @@ import glob
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.multioutput import MultiOutputRegressor  # Ensure this is imported
+from sklearn.multioutput import MultiOutputRegressor
 import warnings
 import traceback  # For detailed error printing
 
 # --- Configuration ---
-BASE_DATA_DIR = "../../data/time_series/2"
-VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")
-PREPROCESSOR_LOAD_PATH = "foundation_multitask_preprocessor_v3_ema_updated.npz"
+BASE_DATA_DIR = "../../data/time_series/1"  # Example, adjust if needed
+VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")  # Source of TestData
+PREPROCESSOR_LOAD_PATH = "foundation_multitask_preprocessor_v3_ema_updated.npz"  # From DL script
 OUTPUT_CSV_CLASSIC_FILENAME = "output_forecast_classic.csv"
 
 DEFAULT_SEQ_LEN = 64
@@ -26,29 +26,31 @@ HGBR_PARAMS = {
 MIN_SAMPLES_FOR_TRAINING = 50
 
 
-def create_windows_for_sensor(series, seq_len, pred_horizons, sensor_name):
+def create_windows_for_sensor(series_np, seq_len, pred_horizons, sensor_name):  # Expects series_np as numpy array
+    """
+    Creates input windows (X) and multi-horizon target vectors (y) for a single sensor series.
+    NaNs in X will be kept (HGBR can handle them). Windows with NaN targets are skipped.
+    """
     X, y = [], []
     max_horizon = 0
-    if pred_horizons:  # Check if pred_horizons is not empty
-        max_horizon = max(pred_horizons)
-    else:  # Should not happen based on prior checks, but as a safeguard
+    if not pred_horizons:
         return np.array(X).reshape(0, seq_len if seq_len > 0 else 0), np.array(y).reshape(0, 0)
+    max_horizon = max(pred_horizons)
 
-    if len(series) < seq_len + max_horizon:
+    if len(series_np) < seq_len + max_horizon:
         return np.array(X).reshape(0, seq_len if seq_len > 0 else 0), np.array(y).reshape(0, len(pred_horizons))
 
-    for i in range(len(series) - seq_len - max_horizon + 1):
-        input_window = series[i: i + seq_len]
+    for i in range(len(series_np) - seq_len - max_horizon + 1):
+        input_window = series_np[i: i + seq_len]
 
         target_values = []
         valid_target = True
-        for h in pred_horizons:
-            target_val_idx = i + seq_len + h - 1
-            # Ensure target_val_idx is within bounds
-            if target_val_idx >= len(series):
+        for h_val in pred_horizons:
+            target_val_idx = i + seq_len + h_val - 1
+            if target_val_idx >= len(series_np):
                 valid_target = False
                 break
-            target_val = series[target_val_idx]
+            target_val = series_np[target_val_idx]
             if np.isnan(target_val):
                 valid_target = False
                 break
@@ -91,14 +93,10 @@ def forecast_with_classical_models():
         print(f"ERROR: Preprocessor file not found at {PREPROCESSOR_LOAD_PATH}. Exiting.")
         return
     except KeyError as e:
-        print(
-            f"ERROR: Missing key {e} in preprocessor file. Ensure it contains 'global_means', 'global_stds', 'canonical_sensor_names', 'seq_len', 'pred_horizons'. Exiting.")
+        print(f"ERROR: Missing key {e} in preprocessor file. Exiting.")
         return
-    if not PRED_HORIZONS:
-        print("ERROR: PRED_HORIZONS is empty. Cannot make predictions. Exiting.")
-        return
-    if len(PRED_HORIZONS) == 0:  # Explicit check
-        print("ERROR: PRED_HORIZONS list has zero length. Cannot make predictions. Exiting.")
+    if not PRED_HORIZONS or len(PRED_HORIZONS) == 0:
+        print("ERROR: PRED_HORIZONS is empty or not defined. Cannot make predictions. Exiting.")
         return
 
     all_sensor_data_for_training = {name: {'X': [], 'y': []} for name in canonical_sensor_names}
@@ -110,7 +108,6 @@ def forecast_with_classical_models():
 
     print(f"\nStep 1: Preparing training data from all {len(file_paths)} CSV files...")
     for fp_idx, filepath in enumerate(file_paths):
-        # print(f"  Processing file {fp_idx+1}/{len(file_paths)}: {os.path.basename(filepath)}") # Less verbose
         try:
             df = pd.read_csv(filepath)
         except Exception as e:
@@ -119,138 +116,147 @@ def forecast_with_classical_models():
 
         for s_idx, sensor_name in enumerate(canonical_sensor_names):
             if sensor_name in df.columns:
-                series_raw = df[sensor_name].astype(float)
+                series_raw = df[sensor_name].astype(float)  # Pandas Series
                 mean = global_means[s_idx]
                 std = global_stds[s_idx]
-                series_norm = series_raw.copy()  # Default to raw if std is too small
+                series_norm_pd = series_raw.copy()  # Keep as Pandas Series for now
                 if std >= 1e-8:
-                    series_norm = (series_raw - mean) / std
+                    series_norm_pd = (series_raw - mean) / std
 
-                X_sensor, y_sensor = create_windows_for_sensor(series_norm, SEQ_LEN, PRED_HORIZONS, sensor_name)
+                # create_windows_for_sensor expects a numpy array
+                X_sensor, y_sensor = create_windows_for_sensor(series_norm_pd.to_numpy(), SEQ_LEN, PRED_HORIZONS,
+                                                               sensor_name)
 
                 if X_sensor.size > 0:
                     all_sensor_data_for_training[sensor_name]['X'].append(X_sensor)
                     all_sensor_data_for_training[sensor_name]['y'].append(y_sensor)
-        if (fp_idx + 1) % 10 == 0:
-            print(f"  Processed {fp_idx + 1}/{len(file_paths)} files for data prep.")
+        if (fp_idx + 1) % 20 == 0 or (fp_idx + 1) == len(file_paths):
+            print(f"  Processed {fp_idx + 1}/{len(file_paths)} files for data preparation.")
 
     print("\nStep 2: Training one model per sensor...")
     trained_models = {}
     for s_idx, sensor_name in enumerate(canonical_sensor_names):
         if not all_sensor_data_for_training[sensor_name]['X']:
             continue
-
         X_list = all_sensor_data_for_training[sensor_name]['X']
         y_list = all_sensor_data_for_training[sensor_name]['y']
-
-        if not X_list or not y_list:
-            continue
+        if not X_list or not y_list: continue
 
         try:
             X_train_sensor = np.concatenate(X_list, axis=0)
             y_train_sensor = np.concatenate(y_list, axis=0)
-        except ValueError as e:  # Handles cases where lists might be empty despite earlier checks if X_sensor.size was 0 but list not empty
-            print(
-                f"  Sensor {sensor_name}: Error concatenating data (likely empty lists or inconsistent sub-array shapes): {e}. Skipping.")
+        except ValueError as e:
+            print(f"  Sensor {sensor_name}: Error concatenating training data: {e}. Skipping.")
             continue
 
-        if X_train_sensor.shape[0] >= MIN_SAMPLES_FOR_TRAINING and y_train_sensor.shape[0] == X_train_sensor.shape[
-            0] and y_train_sensor.ndim == 2 and y_train_sensor.shape[1] == len(PRED_HORIZONS):
+        if X_train_sensor.shape[0] >= MIN_SAMPLES_FOR_TRAINING and \
+                y_train_sensor.shape[0] == X_train_sensor.shape[0] and \
+                y_train_sensor.ndim == 2 and y_train_sensor.shape[1] == len(PRED_HORIZONS):
             print(
-                f"  Training model for sensor: {sensor_name} with X_shape: {X_train_sensor.shape}, y_shape: {y_train_sensor.shape}, y_dtype: {y_train_sensor.dtype}")
-
+                f"  Training model for sensor: {sensor_name} with X_shape: {X_train_sensor.shape}, y_shape: {y_train_sensor.shape}")
             base_estimator = HistGradientBoostingRegressor(**HGBR_PARAMS)
-            # Explicitly use MultiOutputRegressor
-            # n_jobs=-1 can speed up training for multiple targets if CPU cores are available
-            # For debugging, you can remove n_jobs or set to 1
-            model_to_fit = MultiOutputRegressor(base_estimator, n_jobs=-1)
-
-            print(f"    Model object type for fitting: {type(model_to_fit)}")  # DEBUG PRINT
+            model_to_fit = MultiOutputRegressor(base_estimator, n_jobs=-1)  # n_jobs=-1 for parallel fitting of targets
 
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     model_to_fit.fit(X_train_sensor, y_train_sensor)
                 trained_models[sensor_name] = model_to_fit
-                print(f"    Successfully trained model for {sensor_name}.")
             except Exception as e:
                 print(f"    ERROR training model for {sensor_name}: {e}")
-                # print("    Detailed traceback:")
-                # traceback.print_exc() # Uncomment for full traceback if errors persist
         elif X_train_sensor.shape[0] < MIN_SAMPLES_FOR_TRAINING:
             print(
                 f"  Sensor {sensor_name}: Insufficient samples ({X_train_sensor.shape[0]}) for training. Min required: {MIN_SAMPLES_FOR_TRAINING}. Skipping.")
-        else:  # Problem with y_train_sensor shape or consistency
+        else:
             print(
-                f"  Sensor {sensor_name}: Skipping due to inconsistent X/y samples or y_shape issues. X_shape: {X_train_sensor.shape}, y_shape: {y_train_sensor.shape}, Expected y_cols: {len(PRED_HORIZONS)}")
+                f"  Sensor {sensor_name}: Skipping training due to inconsistent X/y samples or y_shape issues. X_shape: {X_train_sensor.shape}, y_shape: {y_train_sensor.shape}, Expected y_cols: {len(PRED_HORIZONS)}")
 
     if not trained_models:
-        print(
-            "ERROR: No models were trained. Cannot proceed to forecasting. Check data preparation and training logs. Exiting.")
+        print("ERROR: No models were trained. Cannot proceed to forecasting. Exiting.")
         return
 
-    print("\nStep 3: Generating forecasts and preparing output CSV...")
+    print("\nStep 3: Generating forecasts (Optimized Prediction Phase)...")
     output_data_list = []
-    max_pred_horizon = 0
-    if PRED_HORIZONS:  # Should always be true by now
-        max_pred_horizon = max(PRED_HORIZONS)
+    max_pred_horizon = max(PRED_HORIZONS) if PRED_HORIZONS else 0
 
     for fp_idx, filepath in enumerate(file_paths):
-        # print(f"  Predicting for file {fp_idx+1}/{len(file_paths)}: {os.path.basename(filepath)}") # Less verbose
         try:
             df_current_file = pd.read_csv(filepath)
         except Exception as e:
             print(f"    Warning: Could not read file {filepath} for prediction: {e}. Skipping.")
             continue
 
-        num_predictable_windows = len(df_current_file) - SEQ_LEN - max_pred_horizon + 1
-        if num_predictable_windows < 0: num_predictable_windows = 0
+        for s_idx, sensor_name in enumerate(canonical_sensor_names):
+            if sensor_name not in df_current_file.columns or sensor_name not in trained_models:
+                continue
 
-        for window_start_idx in range(num_predictable_windows):
-            for s_idx, sensor_name in enumerate(canonical_sensor_names):
-                if sensor_name in df_current_file.columns and sensor_name in trained_models:
-                    model = trained_models[sensor_name]
-                    current_X_raw = df_current_file[sensor_name].iloc[
-                                    window_start_idx: window_start_idx + SEQ_LEN].values.astype(float)
+            model = trained_models[sensor_name]
+            series_raw_np = df_current_file[sensor_name].astype(float).to_numpy()  # Get full series as numpy array
 
-                    if len(current_X_raw) != SEQ_LEN:  # Should not happen with correct slicing
-                        continue
+            mean_s = global_means[s_idx]
+            std_s = global_stds[s_idx]
+            series_norm_np = series_raw_np.copy()
+            if std_s >= 1e-8:
+                series_norm_np = (series_raw_np - mean_s) / std_s
 
-                    mean_s = global_means[s_idx]
-                    std_s = global_stds[s_idx]
-                    current_X_norm = current_X_raw.copy()
-                    if std_s >= 1e-8:
-                        current_X_norm = (current_X_raw - mean_s) / std_s
+            # Determine the number of windows for which full predictions (including all targets) can be made
+            # This is the number of start indices for which a full SEQ_LEN window and all its targets exist
+            num_predictable_windows = len(series_norm_np) - SEQ_LEN - max_pred_horizon + 1
+            if num_predictable_windows <= 0:  # If not enough data to form even one full window + targets
+                continue
 
-                    predicted_y_norm = model.predict(current_X_norm.reshape(1, -1))[0]
+            # Use sliding_window_view to create all X input windows efficiently
+            # Input must be a NumPy array.
+            # The shape of `all_possible_X_input_windows` will be (total_possible_start_points, SEQ_LEN)
+            if len(series_norm_np) < SEQ_LEN:  # Not enough data to form any input window
+                continue
+            all_possible_X_input_windows = np.lib.stride_tricks.sliding_window_view(series_norm_np,
+                                                                                    window_shape=SEQ_LEN)
 
-                    for h_idx, horizon_val in enumerate(PRED_HORIZONS):
-                        pred_val_norm = predicted_y_norm[h_idx]
-                        pred_val_denorm = pred_val_norm
-                        if std_s >= 1e-8:
-                            pred_val_denorm = pred_val_norm * std_s + mean_s
+            # We only need to predict for windows where all targets can be fetched
+            X_batch_to_predict = all_possible_X_input_windows[:num_predictable_windows]
 
-                        actual_val_denorm = np.nan
-                        difference_denorm = np.nan
-                        target_time_idx = window_start_idx + SEQ_LEN + horizon_val - 1
+            if X_batch_to_predict.shape[0] == 0:  # If no valid windows to predict
+                continue
 
-                        if target_time_idx < len(df_current_file):
-                            actual_val_raw = df_current_file[sensor_name].iloc[target_time_idx]
-                            if pd.notna(actual_val_raw):
-                                actual_val_denorm = float(actual_val_raw)
-                                difference_denorm = pred_val_denorm - actual_val_denorm
+            # Perform batch prediction
+            all_predicted_y_norm_batch = model.predict(
+                X_batch_to_predict)  # Shape: (num_predictable_windows, num_horizons)
 
-                        output_data_list.append({
-                            'filepath': os.path.basename(filepath),
-                            'window_start_idx': window_start_idx,
-                            'sensor_name': sensor_name,
-                            'sensor_model_idx': s_idx,
-                            'horizon_steps': horizon_val,
-                            'predicted_value_denormalized': pred_val_denorm,
-                            'actual_value_denormalized': actual_val_denorm,
-                            'difference_denormalized': difference_denorm
-                        })
-        if (fp_idx + 1) % 10 == 0:
+            # Iterate through the predictions and their corresponding start indices
+            for i in range(num_predictable_windows):
+                window_start_idx = i  # The index 'i' corresponds to the window start in series_raw_np/series_norm_np
+                predicted_y_norm_single_window = all_predicted_y_norm_batch[i]  # Predictions for this window
+
+                for h_idx, horizon_val in enumerate(PRED_HORIZONS):
+                    pred_val_norm = predicted_y_norm_single_window[h_idx]
+
+                    pred_val_denorm = pred_val_norm
+                    if std_s >= 1e-8:  # De-normalize
+                        pred_val_denorm = pred_val_norm * std_s + mean_s
+
+                    actual_val_denorm = np.nan
+                    difference_denorm = np.nan
+                    target_time_idx = window_start_idx + SEQ_LEN + horizon_val - 1
+
+                    # series_raw_np is the original, unnormalized data for the sensor for the current file
+                    if target_time_idx < len(series_raw_np):  # Ensure target index is within bounds
+                        actual_val_raw_val = series_raw_np[target_time_idx]
+                        if pd.notna(actual_val_raw_val):  # Check if actual is not NaN
+                            actual_val_denorm = float(actual_val_raw_val)
+                            difference_denorm = pred_val_denorm - actual_val_denorm
+
+                    output_data_list.append({
+                        'filepath': os.path.basename(filepath),
+                        'window_start_idx': window_start_idx,
+                        'sensor_name': sensor_name,
+                        'sensor_model_idx': s_idx,
+                        'horizon_steps': horizon_val,
+                        'predicted_value_denormalized': pred_val_denorm,
+                        'actual_value_denormalized': actual_val_denorm,
+                        'difference_denormalized': difference_denorm
+                    })
+        if (fp_idx + 1) % 20 == 0 or (fp_idx + 1) == len(file_paths):
             print(f"  Predicted for {fp_idx + 1}/{len(file_paths)} files.")
 
     if output_data_list:
