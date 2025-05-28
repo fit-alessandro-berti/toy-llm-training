@@ -11,7 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 
 # --- Configuration (MUST MATCH LATEST TRAINING SCRIPT) ---
 # Data paths
-BASE_DATA_DIR = "../../data/time_series/1"
+BASE_DATA_DIR = "../../data/time_series/2"
 VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")
 OUTPUT_CSV_FILENAME = "output_rca_foundational_fm.csv"  # <<< Name for RCA output
 
