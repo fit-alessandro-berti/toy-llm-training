@@ -11,7 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 
 # --- Configuration (MUST MATCH LATEST TRAINING SCRIPT) ---
 # Data paths
-BASE_DATA_DIR = "../../data/time_series/1"  # Example, adjust if needed
+BASE_DATA_DIR = "../../data/time_series/2"  # Example, adjust if needed
 VALID_DIR = os.path.join(BASE_DATA_DIR, "VALIDATION")  # <<< SET THIS (TestData Source)
 OUTPUT_CSV_FILENAME = "output_failure_prediction_fm.csv"  # <<< Name of the output CSV file for failure predictions
 
